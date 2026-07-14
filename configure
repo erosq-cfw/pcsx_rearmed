@@ -37,7 +37,7 @@ check_define_val()
 # setting options to "yes" or "no" will make that choice default,
 # "" means "autodetect".
 
-platform_list="generic pandora maemo caanoo miyoo"
+platform_list="generic pandora maemo caanoo miyoo erosq"
 platform="generic"
 builtin_gpu_list="neon peops unai"
 dynarec_list="ari64 lightrec none"
@@ -150,6 +150,12 @@ set_platform()
     drc_cache_base="yes"
     optimize_arm926ej="yes"
     need_warm="yes"
+    multithreading="no"
+    ;;
+  erosq)
+    # Ingenic X1000, mipsel musl, no GPU, 320x240 SLCD. Raw-KMS video +
+    # evdev input + dfsound/ALSA. ARCH/dynarec (mipsel->lightrec) autodetected.
+    sound_drivers="alsa"
     multithreading="no"
     ;;
   *)
@@ -458,8 +464,14 @@ EOF
 MAIN_LDLIBS="$MAIN_LDLIBS -lz"
 check_zlib || fail "please install zlib (libz-dev)"
 
-MAIN_LDLIBS="-lpng $MAIN_LDLIBS"
-check_libpng || fail "please install libpng (libpng-dev)"
+if [ "$platform" = "erosq" ]; then
+  # no libpng in the buildroot sysroot; menu skin/screenshots are cosmetic and
+  # readpng is stubbed (-DNO_PNG). Callers fall back to the built-in font.
+  CFLAGS="$CFLAGS -DNO_PNG"
+else
+  MAIN_LDLIBS="-lpng $MAIN_LDLIBS"
+  check_libpng || fail "please install libpng (libpng-dev)"
+fi
 
 # find what audio support we can compile
 if [ "x$sound_drivers" = "x" ]; then
@@ -675,6 +687,12 @@ if [ "$gnu_linker" = "yes" ]; then
   echo "GNU_LINKER = 1" >> $config_mak
 fi
 echo "DYNAREC = $dynarec" >> $config_mak
+if [ "$platform" = "erosq" ]; then
+  # mipsel host: the custom map (RAM + mirrors + BIOS + code buffer) is what
+  # keeps Lightrec's fast addressing; without it psxMap can't reach 0x80000000
+  # ("Memory map is sub-par"). Proven in Milestone 1.
+  echo "LIGHTREC_CUSTOM_MAP = 1" >> $config_mak
+fi
 if [ "$drc_cache_base" = "yes" ]; then
   echo "BASE_ADDR_DYNAMIC = 1" >> $config_mak
 fi

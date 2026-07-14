@@ -430,6 +430,14 @@ frontend/main.o frontend/menu.o: CFLAGS += -include frontend/320240/ui_miyoo.h
 USE_PLUGIN_LIB = 1
 USE_FRONTEND = 1
 endif
+ifeq "$(PLATFORM)" "erosq"
+OBJS += frontend/libpicofe/plat_dummy.o        # provides struct plat_target
+OBJS += frontend/libpicofe/linux/in_evdev.o    # evdev input
+OBJS += frontend/plat_erosq.o frontend/drm_out.o
+frontend/main.o frontend/plugin_lib.o: CFLAGS += -DEROSQ
+USE_PLUGIN_LIB = 1
+USE_FRONTEND = 1
+endif
 ifeq "$(PLATFORM)" "maemo"
 OBJS += maemo/hildon.o maemo/main.o maemo/maemo_xkb.o frontend/pl_gun_ts.o
 USE_PLUGIN_LIB = 1

@@ -48,8 +48,8 @@
 #include "revision.h"
 
 #define REARMED_BIRTHDAY_TIME 1293306830	/* 25 Dec 2010 */
-#if defined(__linux__) && (!defined(__SIZEOF_POINTER__) || __SIZEOF_POINTER__ == 4)
-#define STAT stat64
+#if defined(__linux__) && defined(__GLIBC__) && (!defined(__SIZEOF_POINTER__) || __SIZEOF_POINTER__ == 4)
+#define STAT stat64	/* stat64 is a glibc-ism; musl uses LFS stat (_FILE_OFFSET_BITS=64) */
 #else
 #define STAT stat
 #endif
