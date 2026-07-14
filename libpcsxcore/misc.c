@@ -781,7 +781,16 @@ int SaveState(const char *file) {
 	if (Config.HLE)
 		psxBiosFreeze(1);
 
-	SaveFuncs.write(f, psxRegs.ptrs.psxM, 0x00200000);
+	{
+		/* The lightrec "perfect" custom map identity-maps PSX RAM to host
+		 * address 0, so psxM == NULL. gz{write,read} reject a NULL buffer,
+		 * which would 0-byte the savestate. Use the RAM mirror at +0x200000
+		 * (same shared pages, non-NULL) for the bulk RAM I/O. */
+		char *psxm = (char *)psxRegs.ptrs.psxM;
+		if (psxm == NULL)
+			psxm += 0x200000;
+		SaveFuncs.write(f, psxm, 0x00200000);
+	}
 	SaveFuncs.write(f, psxRegs.ptrs.psxR, 0x00080000);
 	SaveFuncs.write(f, psxRegs.ptrs.psxH, 0x00010000);
 	// only partial save of psxRegisters to maintain savestate compat
@@ -873,7 +882,13 @@ int LoadState(const char *file) {
 	// ex-ScreenPic space
 	SaveFuncs.seek(f, EX_SCREENPIC_SIZE, SEEK_CUR);
 
-	SaveFuncs.read(f, psxRegs.ptrs.psxM, 0x00200000);
+	{
+		/* mirror alias when psxM==NULL (identity custom map) — see SaveState */
+		char *psxm = (char *)psxRegs.ptrs.psxM;
+		if (psxm == NULL)
+			psxm += 0x200000;
+		SaveFuncs.read(f, psxm, 0x00200000);
+	}
 	SaveFuncs.read(f, psxRegs.ptrs.psxR, 0x00080000);
 	SaveFuncs.read(f, psxRegs.ptrs.psxH, 0x00010000);
 	SaveFuncs.read(f, &psxRegs, offsetof(psxRegisters, gteBusyCycle));
