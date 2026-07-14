@@ -721,6 +721,20 @@ static void update_input(void)
 			;
 		emu_act = which;
 	}
+#ifdef EROSQ
+	/* The 6-key device has no spare button for the emu menu, so a chord opens
+	 * it: LEFT+RIGHT (physical prev+next) held together => ENTER_MENU. LEFT/RIGHT
+	 * are the only pad keys that are no-ops on a vertical menu, so holding the
+	 * chord into the just-opened menu can't dismiss or mis-select it (Menu/Back
+	 * would back out, Play would activate). Mask the chord out of the pad. */
+	{
+		unsigned chord = (1u << DKEY_LEFT) | (1u << DKEY_RIGHT);
+		if ((actions[IN_BINDTYPE_PLAYER12] & chord) == chord) {
+			emu_act = SACTION_ENTER_MENU;
+			actions[IN_BINDTYPE_PLAYER12] &= ~chord;
+		}
+	}
+#endif
 	emu_set_action(emu_act);
 
 	in_keystate[0] = actions[IN_BINDTYPE_PLAYER12] & 0xffff;
