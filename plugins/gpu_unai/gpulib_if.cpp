@@ -60,10 +60,38 @@
 #define IS_OLD_RENDERER() false
 #endif
 
+#if defined(__mips__) && defined(GPU_UNAI_USE_MXU)
+#include <signal.h>
+static void gpu_hist_dump(int sig)
+{
+  (void)sig;
+  fprintf(stderr, "[gpu] CF span histogram (spans/pixels):\n");
+  for (int i = 0; i < 1024; i++)
+    if (gpu_hist_span[i])
+      fprintf(stderr, "  CF 0x%03x: %llu / %llu\n",
+              i, gpu_hist_span[i], gpu_hist_px[i]);
+}
+
+static void mxu_spans_init(void)
+{
+  const char *e = getenv("EROSQ_MXU");
+  mxu_spans_on = (e == NULL) || (atoi(e) != 0);
+  e = getenv("EROSQ_GPU_HIST");
+  if (e && atoi(e)) {
+    gpu_hist_on = 1;
+    signal(SIGUSR1, gpu_hist_dump);
+  }
+  fprintf(stderr, "[gpu] MXU spans: %s\n", mxu_spans_on ? "on" : "off");
+}
+#else
+#define mxu_spans_init()
+#endif
+
 int renderer_init(void)
 {
   memset((void*)&gpu_unai, 0, sizeof(gpu_unai));
   gpu_unai.vram = (le16_t *)gpu.vram;
+  mxu_spans_init();
 
   // Original standalone gpu_unai initialized TextureWindow[]. I added the
   //  same behavior here, since it seems unsafe to leave [2],[3] unset when

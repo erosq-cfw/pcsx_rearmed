@@ -435,6 +435,7 @@ OBJS += frontend/libpicofe/plat_dummy.o        # provides struct plat_target
 OBJS += frontend/libpicofe/linux/in_evdev.o    # evdev input
 OBJS += frontend/plat_erosq.o frontend/drm_out.o
 frontend/main.o frontend/plugin_lib.o: CFLAGS += -DEROSQ
+plugins/gpu_unai/gpulib_if.o: CFLAGS += -DGPU_UNAI_USE_MXU
 USE_PLUGIN_LIB = 1
 USE_FRONTEND = 1
 endif

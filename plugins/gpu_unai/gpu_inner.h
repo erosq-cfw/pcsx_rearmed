@@ -57,6 +57,10 @@
 #define gpuLightingTXTGouraud gpuLightingTXTGouraudGeneric
 #endif
 
+#if defined(__mips__) && defined(GPU_UNAI_USE_MXU)
+#include "gpu_inner_mxu.h"
+#endif
+
 // If defined, Gouraud colors are fixed-point 5.11, otherwise they are 8.16
 // This is only for debugging/verification of low-precision colors in C.
 // Low-precision Gouraud is intended for use by SIMD-optimized inner drivers
@@ -570,6 +574,13 @@ static noinline void gpuPolySpanFn(const gpu_unai_t &gpu_unai, le16_t *pDst, u32
 	bool should_blend;
 	s16 DitherLut16[4];
 
+#if defined(__mips__) && defined(GPU_UNAI_USE_MXU)
+	if (unlikely(gpu_hist_on)) {
+		gpu_hist_span[CF & 0x3ff]++;
+		gpu_hist_px[CF & 0x3ff] += count;
+	}
+#endif
+
 	if (CF_DITHER && CF_TEXTMODE)
 		memcpy(DitherLut16, &gpu_unai.DitherLut16[y & 3][0], sizeof(DitherLut16));
 
@@ -795,15 +806,25 @@ static void PolyNULL(const gpu_unai_t &gpu_unai, le16_t *pDst, u32 count, s32 y)
 typedef void (*PP)(const gpu_unai_t &gpu_unai, le16_t *pDst, u32 count, s32 y);
 
 // Template instantiation helper macros
+#if defined(__mips__) && defined(GPU_UNAI_USE_MXU)
+// route every CF through the MXU dispatcher; for CFs it doesn't cover the
+// runtime check folds away and this compiles to a direct C-template call
+#define TI(cf) PolySpanMaybeMXU<(cf)>
+#else
 #define TI(cf) gpuPolySpanFn<(cf)>
+#endif
 #define TN     PolyNULL
 #ifdef __arm__
 #define TA(cf) PolySpanMaybeAsm<(cf)>
+#elif defined(__mips__) && defined(GPU_UNAI_USE_MXU)
+#define TA(cf) PolySpanMaybeMXU<(cf)>
 #else
 #define TA(cf) TI(cf)
 #endif
 #ifdef HAVE_ARMV6
 #define TA6(cf) PolySpanMaybeAsm<(cf)>
+#elif defined(__mips__) && defined(GPU_UNAI_USE_MXU)
+#define TA6(cf) PolySpanMaybeMXU<(cf)>
 #else
 #define TA6(cf) TI(cf)
 #endif
