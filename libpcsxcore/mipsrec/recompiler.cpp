@@ -849,6 +849,9 @@ __asm__ __volatile__ (
 "call_psxBranchTest%=:                        \n"
 "jal   %[psxBranchTest]                       \n"
 "sw    $v0, %[psxRegs_pc_off]($fp)            \n" // <BD> Use BD slot to store new psxRegs.pc val,
+"lbu   $t0, %[psxRegs_stop_off]($fp)          \n" // .stop: frontend requests break (menu/save/quit)
+"bnez  $t0, exit%=                            \n" //  leave dispatch loop so Execute() returns to C
+"nop                                          \n" // <BD>
                                                   //  as psxBranchTest() might issue an exception.
 "lw    $v0, %[psxRegs_pc_off]($fp)            \n" // After psxBranchTest() returns, load psxRegs.pc
                                                   //  back into $v0, which could be different than
@@ -886,6 +889,7 @@ __asm__ __volatile__ (
   [psxRegs_io_cycle_ctr_off]   "i" (off(io_cycle_counter)),
   [recRecompile]               "i" (&recRecompile),
   [psxBranchTest]              "i" (&mipsrec_branch_test),
+  [psxRegs_stop_off]           "i" (off(stop)),
   [psxRecLUT]                  "i" (psxRecLUT)
 : // Clobber - No need to list anything but 'saved' regs
   "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "fp", "ra", "memory"
@@ -1018,6 +1022,9 @@ __asm__ __volatile__ (
 "call_psxBranchTest%=:                        \n"
 "jal   %[psxBranchTest]                       \n"
 "sw    $v0, %[psxRegs_pc_off]($fp)            \n" // <BD> Use BD slot to store new psxRegs.pc val,
+"lbu   $t0, %[psxRegs_stop_off]($fp)          \n" // .stop: frontend requests break (menu/save/quit)
+"bnez  $t0, exit%=                            \n" //  leave dispatch loop so Execute() returns to C
+"nop                                          \n" // <BD>
                                                   //  as psxBranchTest() might issue an exception.
 "lw    $v0, %[psxRegs_pc_off]($fp)            \n" // After psxBranchTest() returns, load psxRegs.pc
                                                   //  back into $v0, which could be different than
@@ -1055,6 +1062,7 @@ __asm__ __volatile__ (
   [psxRegs_io_cycle_ctr_off]   "i" (off(io_cycle_counter)),
   [recRecompile]               "i" (&recRecompile),
   [psxBranchTest]              "i" (&mipsrec_branch_test),
+  [psxRegs_stop_off]           "i" (off(stop)),
   [REC_RAM_VADDR_UPPER]        "i" (REC_RAM_VADDR >> 16)
 : // Clobber - No need to list anything but 'saved' regs
   "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "fp", "ra", "memory"
@@ -1191,6 +1199,9 @@ __asm__ __volatile__ (
 "jal   %[psxBranchTest]                       \n"
 "sw    $v0, %[psxRegs_pc_off]($fp)            \n" // <BD> Store new psxRegs.pc val before calling C
 "branchtest_fastpath_retaddr%=:               \n" // Next 3 instructions shared with 'fastpath' code..
+"lbu   $t0, %[psxRegs_stop_off]($fp)          \n" // .stop: frontend requests break (menu/save/quit)
+"bnez  $t0, exit%=                            \n" //  leave dispatch loop so Execute() returns to C
+"nop                                          \n" // <BD>
 "lw    $v0, %[psxRegs_pc_off]($fp)            \n" // After psxBranchTest() returns, load psxRegs.pc
                                                   //  back into $v0, which could be different than
                                                   //  before the call if an exception was issued.
@@ -1274,6 +1285,7 @@ __asm__ __volatile__ (
   [psxRegs_io_cycle_ctr_off]   "i" (off(io_cycle_counter)),
   [recRecompile]               "i" (&recRecompile),
   [psxBranchTest]              "i" (&mipsrec_branch_test),
+  [psxRegs_stop_off]           "i" (off(stop)),
   [psxRecLUT]                  "i" (psxRecLUT)
 : // Clobber - No need to list anything but 'saved' regs
   "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "fp", "ra", "memory"
@@ -1413,6 +1425,9 @@ __asm__ __volatile__ (
 "jal   %[psxBranchTest]                       \n"
 "sw    $v0, %[psxRegs_pc_off]($fp)            \n" // <BD> Store new psxRegs.pc val before calling C
 "branchtest_fastpath_retaddr%=:               \n" // Next 3 instructions shared with 'fastpath' code..
+"lbu   $t0, %[psxRegs_stop_off]($fp)          \n" // .stop: frontend requests break (menu/save/quit)
+"bnez  $t0, exit%=                            \n" //  leave dispatch loop so Execute() returns to C
+"nop                                          \n" // <BD>
 "lw    $v0, %[psxRegs_pc_off]($fp)            \n" // After psxBranchTest() returns, load psxRegs.pc
                                                   //  back into $v0, which could be different than
                                                   //  before the call if an exception was issued.
@@ -1496,6 +1511,7 @@ __asm__ __volatile__ (
   [psxRegs_io_cycle_ctr_off]   "i" (off(io_cycle_counter)),
   [recRecompile]               "i" (&recRecompile),
   [psxBranchTest]              "i" (&mipsrec_branch_test),
+  [psxRegs_stop_off]           "i" (off(stop)),
   [REC_RAM_VADDR_UPPER]        "i" (REC_RAM_VADDR >> 16)
 : // Clobber - No need to list anything but 'saved' regs
   "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "fp", "ra", "memory"
