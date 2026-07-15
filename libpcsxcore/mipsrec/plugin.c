@@ -64,7 +64,20 @@ static void mipsrec_execute(struct psxRegisters *regs)
 
 static void mipsrec_execute_block(struct psxRegisters *regs, enum blockExecCaller c)
 {
-	mipsrec_rec_execute_block(regs->pc);
+	/* recExecuteBlock(target) runs the internal dispatch loop until pc == target
+	 * (its run-to-a-return-address primitive, used for HLE softcalls). rearmed's
+	 * real-BIOS psxExecuteBios (r3000a.c) instead loops ExecuteBlock and breaks
+	 * when psxExecuteBiosEnded() (pc enters 0x8000_0000 space) — it expects the
+	 * call to return at the BIOS->shell handoff. Passing regs->pc as the target
+	 * makes it "run until pc loops back to the entry", which never happens at the
+	 * handoff, so the whole game ran INSIDE this call and psxReset() never
+	 * returned — leaving the frontend's SysReset() with GPU_vBlank swapped to its
+	 * no-op dummy (no frame ever presented -> black screen, though CPU+SPU ran).
+	 * The retail BIOS always hands off to the shell at exactly 0x80030000 (which
+	 * psxReset itself checks for), and boot stays in ROM until then, so target
+	 * that for the boot caller; softcalls keep the run-to-return semantics. */
+	u32 target = (c == EXEC_CALLER_BOOT) ? 0x80030000u : regs->pc;
+	mipsrec_rec_execute_block(target);
 }
 
 static void mipsrec_clear(u32 addr, u32 size) { mipsrec_rec_clear(addr, size); }
