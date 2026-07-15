@@ -20,7 +20,7 @@
 #include "arm_features.h"
 #include "../gte.h"
 #include "../gte_divider.h"
-#if defined(NDRC_THREAD) && !defined(DRC_DISABLE) && !defined(LIGHTREC)
+#if defined(NDRC_THREAD) && !defined(DRC_DISABLE) && !defined(LIGHTREC) && !defined(MIPSREC)
 #include "../../frontend/pcsxr-threads.h"
 #include "features/features_cpu.h"
 #include "retro_timers.h"
@@ -93,7 +93,7 @@ void ndrc_clear_full(void)
 	new_dynarec_clear_full();
 }
 
-#if !defined(DRC_DISABLE) && !defined(LIGHTREC)
+#if !defined(DRC_DISABLE) && !defined(LIGHTREC) && !defined(MIPSREC)
 #include "linkage_offsets.h"
 
 static void ari64_thread_init(void);

@@ -205,6 +205,19 @@ ifeq ($(MMAP_WIN32),1)
 deps/lightning/lib/lightning.o: CFLAGS += -Dmprotect=_mprotect # deps/mman
 deps/lightning/lib/jit_print.o: CFLAGS += -w
 endif
+else ifeq "$(DYNAREC)" "mipsrec"
+# Built like the Lightrec backend: MIPSREC (not DRC_DISABLE), so r3000a.c's
+# psxInit() keeps its real dispatch (psxCpu = &psxRec when Config.Cpu !=
+# CPU_INTERPRETER, the default) instead of the DRC_DISABLE path that hard-forces
+# the interpreter. mipsrec/plugin.o owns psxRegs/rcnts (r3000a.c & psxcounters.c
+# only define those under DRC_DISABLE); ndrc_g and the new_dynarec_* stubs come
+# from emu_if.c's non-ari64 branch, which we opt into via the !defined(MIPSREC)
+# guards added there (same treatment LIGHTREC gets).
+CFLAGS += -DMIPSREC
+OBJS += libpcsxcore/mipsrec/plugin.o
+# vendored recompiler objects added in Phase 1:
+# OBJS += libpcsxcore/mipsrec/recompiler.o libpcsxcore/mipsrec/mips_codegen.o \
+#         libpcsxcore/mipsrec/host_asm.o
 else ifeq "$(DYNAREC)" "ari64"
  OBJS += libpcsxcore/new_dynarec/new_dynarec.o
  OBJS += libpcsxcore/new_dynarec/pcsxmem.o

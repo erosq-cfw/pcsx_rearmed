@@ -40,7 +40,7 @@ check_define_val()
 platform_list="generic pandora maemo caanoo miyoo erosq"
 platform="generic"
 builtin_gpu_list="neon peops unai"
-dynarec_list="ari64 lightrec none"
+dynarec_list="ari64 lightrec mipsrec none"
 builtin_gpu=""
 sound_driver_list="oss alsa pulseaudio sdl"
 sound_drivers=""
