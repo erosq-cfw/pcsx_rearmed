@@ -32,3 +32,8 @@ psx_gpu_offsets_update
 /bios/
 /old/
 /a/
+
+# erosq throwaway test-tool build outputs (sources are tracked)
+/erosq_lr_probe
+/erosq_lr_probe_nopic
+/evinject
