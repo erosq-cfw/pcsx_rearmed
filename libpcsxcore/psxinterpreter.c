@@ -1387,6 +1387,18 @@ void execI(psxRegisters *regs) {
 	} while (loop);
 }
 
+// Execute a single opcode word against regs, with immediate register effect.
+// Used by the mipsrec dynarec's branch-delay-slot load-hazard fixup
+// (execBranchLoadDelay), which drives its own no-arg psxBSC[] trampoline here.
+// The mipsrec backend manages GPRs itself and never uses this interpreter's
+// deferred-load (dloadReg) pipeline, so flush the load immediately.
+void psxExecuteOpcode(psxRegisters *regs, u32 code)
+{
+	regs->code = code;
+	psxBSC[code >> 26](regs, code);
+	dloadFlush(regs);
+}
+
 R3000Acpu psxInt = {
 	intInit,
 	intReset,

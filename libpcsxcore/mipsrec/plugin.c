@@ -1,31 +1,103 @@
 #include "../r3000a.h"
 #include "../psxmem.h"
 #include "../psxcounters.h"
+#include "../psxevents.h"     /* gen_interupt, schedule_timeslice */
+#include "../psxinterpreter.h"/* psxExecuteOpcode (single-op interp helper) */
 #include "../sio.h"
 #include "../gte.h"
-
-/* Phase 0: delegate everything to the interpreter to prove the socket.
- * Replaced piecewise by the real recompiler in later phases. */
-extern R3000Acpu psxInt;
 
 /* This build defines neither DRC_DISABLE nor LIGHTREC, so r3000a.c and
  * psxcounters.c do NOT define these globals (they only do under DRC_DISABLE).
  * We own them here, exactly as libpcsxcore/lightrec/plugin.c does
  * (plugin.c:68-69). The new_dynarec_* stubs and ndrc_g come from
  * new_dynarec/emu_if.c's non-ari64 branch, which we opt into by extending its
- * guards with !defined(MIPSREC) (same treatment LIGHTREC gets). */
+ * guards with !defined(MIPSREC) (same treatment LIGHTREC gets).
+ *
+ * IMPORTANT: this is THE one-and-only psxRegs. recompiler.cpp's dispatch
+ * loops set $fp/$s8 (PERM_REG_1) to &psxRegs of THIS object via their
+ * `[psxRegs] "i" (&psxRegs)` inline-asm operands, and every mipsrec offset
+ * macro (off()/offGPR/…) is relative to it — so the recompiled code, the
+ * memory seam, the GTE shims and the scheduler all operate on this struct. */
 psxRegisters psxRegs;
 Rcnt rcnts[4];
 
-static int  mipsrec_init(void)                                   { return psxInt.Init(); }
-static void mipsrec_reset(void)                                  { psxInt.Reset(); }
-static void mipsrec_execute(struct psxRegisters *regs)           { psxInt.Execute(regs); }
+/* C-linkage entry points into the recompiler (defined extern "C" at the
+ * bottom of recompiler.cpp; also documented in compat.h, which this TU does
+ * NOT include). */
+int  mipsrec_rec_init(void);
+void mipsrec_rec_reset(void);
+void mipsrec_rec_execute(void);
+void mipsrec_rec_execute_block(unsigned pc);
+void mipsrec_rec_clear(u32 addr, u32 size);
+void mipsrec_rec_notify(int note, void *data);
+void mipsrec_rec_shutdown(void);
+
+/* Phase 3 (GO LIVE) — the cycle seam. mipsrec's dispatch loops jal here when
+ * psxRegs.cycle >= psxRegs.next_interupt. gen_interupt() is rearmed's
+ * canonical horizon service (irq_test + schedule_timeslice), identical to
+ * what ari64 (emu_if.c pcsx_mtc0) and lightrec (lightrec/plugin.c) call at the
+ * same seam. It (a) dispatches every due event and raises any pending IRQ via
+ * irq_test(), then (b) recomputes psxRegs.next_interupt = cycle + min (min >= 1
+ * always, since schedule_timeslice only counts strictly-future events and
+ * floors at PSXCLK) — i.e. STRICTLY ahead of cycle, guaranteeing the loop
+ * makes forward progress. Deliberately NOT rearmed's psxBranchTest()
+ * (r3000a.c), which omits schedule_timeslice and would leave next_interupt
+ * stale == cycle → infinite spin at boot. See compat.h Seam 2b. */
+void mipsrec_branch_test(void)
+{
+	gen_interupt(&psxRegs.CP0);
+}
+
+static int  mipsrec_init(void)  { return mipsrec_rec_init(); }
+static void mipsrec_reset(void) { mipsrec_rec_reset(); }
+
+static void mipsrec_execute(struct psxRegisters *regs)
+{
+	/* Prime next_interupt before entering the (single, infinite) dispatch
+	 * loop, mirroring ari64_execute()'s per-timeslice schedule_timeslice().
+	 * The loop re-primes via mipsrec_branch_test()->gen_interupt() on every
+	 * subsequent horizon hit; this just bounds the very first timeslice so a
+	 * stale-high next_interupt can't delay the first IRQ service. */
+	schedule_timeslice(&psxRegs);
+	mipsrec_rec_execute();
+}
+
 static void mipsrec_execute_block(struct psxRegisters *regs, enum blockExecCaller c)
-                                                                 { psxInt.ExecuteBlock(regs, c); }
-static void mipsrec_clear(u32 addr, u32 size)                    { psxInt.Clear(addr, size); }
-static void mipsrec_notify(enum R3000Anote note, void *data)     { psxInt.Notify(note, data); }
-static void mipsrec_apply_config(void)                           { psxInt.ApplyConfig(); }
-static void mipsrec_shutdown(void)                               { psxInt.Shutdown(); }
+{
+	mipsrec_rec_execute_block(regs->pc);
+}
+
+static void mipsrec_clear(u32 addr, u32 size) { mipsrec_rec_clear(addr, size); }
+
+/* Notify enum translation. rearmed's enum R3000Anote (r3000a.h) is:
+ *   CACHE_ISOLATED=0, CACHE_UNISOLATED=1, BEFORE_SAVE=2, AFTER_LOAD=3,
+ *   AFTER_LOAD_STATE=4.
+ * recNotify() (recompiler.cpp) only understands CACHE_ISOLATED/UNISOLATED
+ * (same 0/1 values — compiled against this very enum) plus its own
+ * pcsx4all-only DMA3_EXE_LOAD (compat.h aliases it to 100, never sent by
+ * rearmed). The save/load notifies have no pcsx4all analogue, so we handle
+ * them here: a state load replaces PS1 RAM wholesale, invalidating every
+ * recompiled block, so flush the whole code cache (recReset). BEFORE_SAVE is
+ * a no-op — mipsrec keeps no cached CPU state outside psxRegs to sync. */
+static void mipsrec_notify(enum R3000Anote note, void *data)
+{
+	switch (note) {
+	case R3000ACPU_NOTIFY_CACHE_ISOLATED:
+	case R3000ACPU_NOTIFY_CACHE_UNISOLATED:
+		mipsrec_rec_notify((int)note, data);
+		break;
+	case R3000ACPU_NOTIFY_AFTER_LOAD:
+	case R3000ACPU_NOTIFY_AFTER_LOAD_STATE:
+		mipsrec_rec_reset();
+		break;
+	case R3000ACPU_NOTIFY_BEFORE_SAVE:
+	default:
+		break;
+	}
+}
+
+static void mipsrec_apply_config(void) { /* Phase 4 */ }
+static void mipsrec_shutdown(void)     { mipsrec_rec_shutdown(); }
 
 R3000Acpu psxRec = {
 	mipsrec_init, mipsrec_reset, mipsrec_execute, mipsrec_execute_block,
@@ -189,3 +261,221 @@ GTE_SHIM1(GPL,   GTEOP_GPL)
 #undef GTE_SHIM0_LM1
 #undef GTE_SHIM0_LM0
 #undef GTE_SHIM1
+
+/* ======================================================================
+ * Seam 5 (Phase 3 GO LIVE) — load-delay-hazard helpers.
+ *
+ * rec_bcu.cpp.h's branch/jump emitters reference two pcsx4all-only symbols
+ * that were undefined (but --gc-section-hidden) until dispatch went live:
+ *
+ *  (1) psxTestLoadDelay(reg, tmp): PURE opcode analysis — given a load's
+ *      target GPR `reg` and the following opcode word `tmp`, classify the
+ *      load-delay interaction (0=none, 1=read+write, 2=read, 3=write). No
+ *      machine state involved, so it is reproduced here VERBATIM from
+ *      pcsx4all/src/psxinterpreter.cpp:128-282 (a bit-for-bit copy, incl. its
+ *      Xenogears no-load-delay quirks for REGIMM/BEQ/BNE/BLEZ/BGTZ). Used at
+ *      recompile time in DelayTest()/iJumpAL()/recBxx()/…, so it MUST be
+ *      exact.
+ *
+ *  (2) psxBSC[64] (no-arg): pcsx4all's classic per-primary-opcode interpreter
+ *      dispatch table. rec_bcu.cpp.h JALs it ONLY inside execBranchLoadDelay()
+ *      (the "load in a JR/branch delay slot" fixup, e.g. Skullmonkeys / Tomb
+ *      Raider), where it executes ONE opcode held in psxRegs.code. rearmed's
+ *      own interpreter table is file-static, has a (regs,code) signature, and
+ *      is not even populated in the mipsrec build (psxInit() runs only
+ *      psxRec.Init, never intInit). So we route all 64 no-arg slots through a
+ *      single trampoline into rearmed's real interpreter via the newly
+ *      exposed psxExecuteOpcode(regs, code) helper (psxinterpreter.c), which
+ *      dispatches the opcode and force-flushes rearmed's deferred load so the
+ *      register effect is immediate (mipsrec, like pcsx4all, manages its own
+ *      GPRs and never touches rearmed's dloadReg pipeline). See the
+ *      "unverified" list in the report for the residual-risk corner (a taken
+ *      branch appearing as the code2 operand of a chained delay slot).
+ * ====================================================================== */
+
+/* pcsx4all field-extractors, scoped to psxTestLoadDelay (operate on `tmp`). */
+#define _tFunct_  ((tmp      ) & 0x3F)
+#define _tRd_     ((tmp >> 11) & 0x1F)
+#define _tRt_     ((tmp >> 16) & 0x1F)
+#define _tRs_     ((tmp >> 21) & 0x1F)
+
+int psxTestLoadDelay(int reg, u32 tmp)
+{
+	if (tmp == 0) return 0; // NOP
+	switch (tmp >> 26) {
+		case 0x00: // SPECIAL
+			switch (_tFunct_) {
+				case 0x00: // SLL
+				case 0x02: case 0x03: // SRL/SRA
+					if (_tRd_ == reg && _tRt_ == reg) return 1; else
+					if (_tRt_ == reg) return 2; else
+					if (_tRd_ == reg) return 3;
+					break;
+
+				case 0x08: // JR
+					if (_tRs_ == reg) return 2;
+					break;
+				case 0x09: // JALR
+					if (_tRd_ == reg && _tRs_ == reg) return 1; else
+					if (_tRs_ == reg) return 2; else
+					if (_tRd_ == reg) return 3;
+					break;
+
+				// SYSCALL/BREAK just a break;
+
+				case 0x20: case 0x21: case 0x22: case 0x23:
+				case 0x24: case 0x25: case 0x26: case 0x27:
+				case 0x2a: case 0x2b: // ADD/ADDU...
+				case 0x04: case 0x06: case 0x07: // SLLV...
+					if (_tRd_ == reg && (_tRt_ == reg || _tRs_ == reg)) return 1; else
+					if (_tRt_ == reg || _tRs_ == reg) return 2; else
+					if (_tRd_ == reg) return 3;
+					break;
+
+				case 0x10: case 0x12: // MFHI/MFLO
+					if (_tRd_ == reg) return 3;
+					break;
+				case 0x11: case 0x13: // MTHI/MTLO
+					if (_tRs_ == reg) return 2;
+					break;
+
+				case 0x18: case 0x19:
+				case 0x1a: case 0x1b: // MULT/DIV...
+					if (_tRt_ == reg || _tRs_ == reg) return 2;
+					break;
+			}
+			break;
+
+		case 0x01: // REGIMM
+			switch (_tRt_) {
+				case 0x00: case 0x01:
+				case 0x10: case 0x11: // BLTZ/BGEZ...
+					// Xenogears - lbu v0 / beq v0
+					// - no load delay (fixes battle loading)
+					break;
+			}
+			break;
+
+		// J would be just a break;
+		case 0x03: // JAL
+			if (31 == reg) return 3;
+			break;
+
+		case 0x04: case 0x05: // BEQ/BNE
+			// Xenogears - lbu v0 / beq v0
+			// - no load delay (fixes battle loading)
+			break;
+
+		case 0x06: case 0x07: // BLEZ/BGTZ
+			// Xenogears - lbu v0 / beq v0
+			// - no load delay (fixes battle loading)
+			break;
+
+		case 0x08: case 0x09: case 0x0a: case 0x0b:
+		case 0x0c: case 0x0d: case 0x0e: // ADDI/ADDIU...
+			if (_tRt_ == reg && _tRs_ == reg) return 1; else
+			if (_tRs_ == reg) return 2; else
+			if (_tRt_ == reg) return 3;
+			break;
+
+		case 0x0f: // LUI
+			if (_tRt_ == reg) return 3;
+			break;
+
+		case 0x10: // COP0
+			switch (_tFunct_) {
+				case 0x00: // MFC0
+					if (_tRt_ == reg) return 3;
+					break;
+				case 0x02: // CFC0
+					if (_tRt_ == reg) return 3;
+					break;
+				case 0x04: // MTC0
+					if (_tRt_ == reg) return 2;
+					break;
+				case 0x06: // CTC0
+					if (_tRt_ == reg) return 2;
+					break;
+				// RFE just a break;
+			}
+			break;
+
+		case 0x12: // COP2
+			switch (_tFunct_) {
+				case 0x00:
+					switch (_tRs_) {
+						case 0x00: // MFC2
+							if (_tRt_ == reg) return 3;
+							break;
+						case 0x02: // CFC2
+							if (_tRt_ == reg) return 3;
+							break;
+						case 0x04: // MTC2
+							if (_tRt_ == reg) return 2;
+							break;
+						case 0x06: // CTC2
+							if (_tRt_ == reg) return 2;
+							break;
+					}
+					break;
+				// RTPS... break;
+			}
+			break;
+
+		case 0x22: case 0x26: // LWL/LWR
+			if (_tRt_ == reg) return 3; else
+			if (_tRs_ == reg) return 2;
+			break;
+
+		case 0x20: case 0x21: case 0x23:
+		case 0x24: case 0x25: // LB/LH/LW/LBU/LHU
+			if (_tRt_ == reg && _tRs_ == reg) return 1; else
+			if (_tRs_ == reg) return 2; else
+			if (_tRt_ == reg) return 3;
+			break;
+
+		case 0x28: case 0x29: case 0x2a:
+		case 0x2b: case 0x2e: // SB/SH/SWL/SW/SWR
+			if (_tRt_ == reg || _tRs_ == reg) return 2;
+			break;
+
+		case 0x32: case 0x3a: // LWC2/SWC2
+			if (_tRs_ == reg) return 2;
+			break;
+	}
+
+	return 0;
+}
+
+#undef _tFunct_
+#undef _tRd_
+#undef _tRt_
+#undef _tRs_
+
+/* No-arg interpreter dispatch table. Every slot points at one trampoline that
+ * hands the opcode already loaded in psxRegs.code to rearmed's interpreter
+ * (immediate load effect). Referenced by rec_bcu.cpp.h as
+ * `extern void (*psxBSC[64])(void)`. */
+static void mipsrec_interp_op(void)
+{
+	psxExecuteOpcode(&psxRegs, psxRegs.code);
+}
+
+void (*psxBSC[64])(void) = {
+	mipsrec_interp_op, mipsrec_interp_op, mipsrec_interp_op, mipsrec_interp_op,
+	mipsrec_interp_op, mipsrec_interp_op, mipsrec_interp_op, mipsrec_interp_op,
+	mipsrec_interp_op, mipsrec_interp_op, mipsrec_interp_op, mipsrec_interp_op,
+	mipsrec_interp_op, mipsrec_interp_op, mipsrec_interp_op, mipsrec_interp_op,
+	mipsrec_interp_op, mipsrec_interp_op, mipsrec_interp_op, mipsrec_interp_op,
+	mipsrec_interp_op, mipsrec_interp_op, mipsrec_interp_op, mipsrec_interp_op,
+	mipsrec_interp_op, mipsrec_interp_op, mipsrec_interp_op, mipsrec_interp_op,
+	mipsrec_interp_op, mipsrec_interp_op, mipsrec_interp_op, mipsrec_interp_op,
+	mipsrec_interp_op, mipsrec_interp_op, mipsrec_interp_op, mipsrec_interp_op,
+	mipsrec_interp_op, mipsrec_interp_op, mipsrec_interp_op, mipsrec_interp_op,
+	mipsrec_interp_op, mipsrec_interp_op, mipsrec_interp_op, mipsrec_interp_op,
+	mipsrec_interp_op, mipsrec_interp_op, mipsrec_interp_op, mipsrec_interp_op,
+	mipsrec_interp_op, mipsrec_interp_op, mipsrec_interp_op, mipsrec_interp_op,
+	mipsrec_interp_op, mipsrec_interp_op, mipsrec_interp_op, mipsrec_interp_op,
+	mipsrec_interp_op, mipsrec_interp_op, mipsrec_interp_op, mipsrec_interp_op,
+	mipsrec_interp_op, mipsrec_interp_op, mipsrec_interp_op, mipsrec_interp_op,
+};

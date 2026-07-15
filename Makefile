@@ -214,6 +214,19 @@ else ifeq "$(DYNAREC)" "mipsrec"
 # from emu_if.c's non-ari64 branch, which we opt into via the !defined(MIPSREC)
 # guards added there (same treatment LIGHTREC gets).
 CFLAGS += -DMIPSREC
+# GO LIVE (Phase 3): the recompiler's dispatch loops and every recompiled block
+# reach C helpers with bare JAL/J (mips_codegen.h) and address locals/tables
+# with absolute lui/%hi+%lo — neither is representable in the toolchain-default
+# PIC/abicalls model (bare JAL does not set $t9, so an abicalls callee would
+# rebuild $gp from garbage; %hi against a local errors as "R_MIPS_HI16 ... when
+# making a shared object"). Build the whole pcsx binary non-PIC/non-abicalls
+# (matching the pcsx4all reference) and link -no-pie so .text sits at a fixed
+# low address, keeping all JAL targets inside one 256MB region. -mplt keeps
+# calls into shared musl libc working; -G0 removes $gp-relative small-data.
+# (Until dispatch went live these functions were --gc-sections-dropped, so the
+# default PIC build linked; go-live makes them reachable and forces this.)
+CFLAGS  += -fno-pic -mno-abicalls -mno-shared -mplt -G0
+LDFLAGS += -no-pie
 OBJS += libpcsxcore/mipsrec/plugin.o
 # Vendored recompiler tree (Phase 1: compiles, not yet wired into plugin.c —
 # that's Phase 3). recompiler.cpp and mips_codegen.cpp are C++ (built via the

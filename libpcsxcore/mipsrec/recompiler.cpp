@@ -164,6 +164,20 @@ void rec_munmap_psx_mem();
 int  rec_mmap_rec_mem();
 void rec_munmap_rec_mem();
 
+/* EROSQ/rearmed port (Phase 3): inert definitions of the Phase-6 mmap API.
+ * SHMEM_MIRRORING/TMPFS_MIRRORING are undefined, so psx_mem_mapped and
+ * rec_mem_mapped are constant-false: rec_mmap_*() are only *referenced* under
+ * the never-compiled USE_VIRTUAL_*_MAPPING branches (recInit), and
+ * rec_munmap_*() only under recShutdown()'s always-false runtime guards. Until
+ * Phase 3 wired recShutdown() live (via mipsrec_rec_shutdown), --gc-sections
+ * dropped recShutdown() entirely and these stayed unreferenced; now the
+ * symbols must resolve. Bodies are deliberately inert (never executed) and get
+ * replaced wholesale by the real mem_mapping.* in Phase 6. */
+int  rec_mmap_psx_mem()   { return -1; }
+void rec_munmap_psx_mem() { }
+int  rec_mmap_rec_mem()   { return -1; }
+void rec_munmap_rec_mem() { }
+
 /* Bit vector indicating which PS1 RAM pages contain the start of blocks.
  *  Used to determine when code invalidation in recClear() can be skipped.
  */
@@ -734,7 +748,7 @@ __attribute__((noinline)) void recExecute_indirect_return_lut()
 		recFunc((void *)*p);
 
 		if (psxRegs.cycle >= psxRegs.io_cycle_counter)
-			psxBranchTest();
+			mipsrec_branch_test();
 	}
 #else
 __asm__ __volatile__ (
@@ -868,7 +882,7 @@ __asm__ __volatile__ (
   [psxRegs_cycle_off]          "i" (off(cycle)),
   [psxRegs_io_cycle_ctr_off]   "i" (off(io_cycle_counter)),
   [recRecompile]               "i" (&recRecompile),
-  [psxBranchTest]              "i" (&psxBranchTest),
+  [psxBranchTest]              "i" (&mipsrec_branch_test),
   [psxRecLUT]                  "i" (psxRecLUT)
 : // Clobber - No need to list anything but 'saved' regs
   "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "fp", "ra", "memory"
@@ -899,7 +913,7 @@ __attribute__((noinline)) static void recExecute_indirect_return_mmap()
 		recFunc((void *)*p);
 
 		if (psxRegs.cycle >= psxRegs.io_cycle_counter)
-			psxBranchTest();
+			mipsrec_branch_test();
 	}
 #else
 __asm__ __volatile__ (
@@ -1037,7 +1051,7 @@ __asm__ __volatile__ (
   [psxRegs_cycle_off]          "i" (off(cycle)),
   [psxRegs_io_cycle_ctr_off]   "i" (off(io_cycle_counter)),
   [recRecompile]               "i" (&recRecompile),
-  [psxBranchTest]              "i" (&psxBranchTest),
+  [psxBranchTest]              "i" (&mipsrec_branch_test),
   [REC_RAM_VADDR_UPPER]        "i" (REC_RAM_VADDR >> 16)
 : // Clobber - No need to list anything but 'saved' regs
   "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "fp", "ra", "memory"
@@ -1256,7 +1270,7 @@ __asm__ __volatile__ (
   [psxRegs_cycle_off]          "i" (off(cycle)),
   [psxRegs_io_cycle_ctr_off]   "i" (off(io_cycle_counter)),
   [recRecompile]               "i" (&recRecompile),
-  [psxBranchTest]              "i" (&psxBranchTest),
+  [psxBranchTest]              "i" (&mipsrec_branch_test),
   [psxRecLUT]                  "i" (psxRecLUT)
 : // Clobber - No need to list anything but 'saved' regs
   "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "fp", "ra", "memory"
@@ -1478,7 +1492,7 @@ __asm__ __volatile__ (
   [psxRegs_cycle_off]          "i" (off(cycle)),
   [psxRegs_io_cycle_ctr_off]   "i" (off(io_cycle_counter)),
   [recRecompile]               "i" (&recRecompile),
-  [psxBranchTest]              "i" (&psxBranchTest),
+  [psxBranchTest]              "i" (&mipsrec_branch_test),
   [REC_RAM_VADDR_UPPER]        "i" (REC_RAM_VADDR >> 16)
 : // Clobber - No need to list anything but 'saved' regs
   "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "fp", "ra", "memory"
@@ -1506,7 +1520,7 @@ __attribute__((noinline)) static void recExecuteBlock(unsigned target_pc)
 		recFunc((void *)*p);
 
 		if (psxRegs.cycle >= psxRegs.io_cycle_counter)
-			psxBranchTest();
+			mipsrec_branch_test();
 	} while (psxRegs.pc != target_pc);
 #else
 __asm__ __volatile__ (
@@ -1653,7 +1667,7 @@ __asm__ __volatile__ (
   [psxRegs_io_cycle_ctr_off]   "i" (off(io_cycle_counter)),
   [psxRecLUT]                  "i" (psxRecLUT),
   [recRecompile]               "i" (&recRecompile),
-  [psxBranchTest]              "i" (&psxBranchTest)
+  [psxBranchTest]              "i" (&mipsrec_branch_test)
 : // Clobber - No need to list anything but 'saved' regs
   "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "fp", "ra", "memory"
 );
@@ -1829,3 +1843,17 @@ static void recReset()
  * recExecuteBlock/recClear/recNotify/recShutdown into plugin.c's psxRec is
  * Task 1.3 / Phase 3, not this task. All seven stay file-static (matching
  * the task brief's "Produces" list) until then. */
+
+/* Phase 3 (GO LIVE): the seven recompiler entry points above are file-static.
+ * Expose them to plugin.c (plain C, unmangled) via C-linkage wrappers so the
+ * psxRec vtable can drive the real recompiler. Same-TU calls, so the static
+ * targets are visible here. Declared in compat.h + plugin.c. */
+extern "C" {
+	int  mipsrec_rec_init(void)                     { return recInit(); }
+	void mipsrec_rec_reset(void)                    { recReset(); }
+	void mipsrec_rec_execute(void)                  { recExecute(); }
+	void mipsrec_rec_execute_block(unsigned pc)     { recExecuteBlock(pc); }
+	void mipsrec_rec_clear(u32 addr, u32 size)      { recClear(addr, size); }
+	void mipsrec_rec_notify(int note, void *data)   { recNotify(note, data); }
+	void mipsrec_rec_shutdown(void)                 { recShutdown(); }
+}

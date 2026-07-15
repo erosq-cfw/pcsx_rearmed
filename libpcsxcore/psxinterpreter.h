@@ -12,4 +12,7 @@ void execI(struct psxRegisters *regs);
 void intApplyConfig();
 void MTC0(struct psxRegisters *regs, int reg, u32 val);
 
+// execute one opcode word with immediate register effect (mipsrec dynarec)
+void psxExecuteOpcode(struct psxRegisters *regs, u32 code);
+
 #endif // __PSXINTERPRETER_H__

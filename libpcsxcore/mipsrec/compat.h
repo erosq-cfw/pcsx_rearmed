@@ -92,20 +92,43 @@ static inline void pl_dynarec_notify(void) { }
  * own headers — this file is only pulled in from libpcsxcore/mipsrec/. */
 #define io_cycle_counter next_interupt
 
-/* psxBranchTest is intentionally left UNSHIMMED, unlike the brief's original
- * sketch: rearmed's r3000a.h already declares `void psxBranchTest();`, and
- * the vendored dispatch loops use it as an inline-asm named operand —
- * `[psxBranchTest] "i" (&psxBranchTest)` with template references
- * `%[psxBranchTest]`. GCC macro-expands the bracketed operand *name* and the
- * `&psxBranchTest` *value* (both are ordinary preprocessor tokens), but NOT
- * the template string (a string literal, opaque to the preprocessor) — so a
- * `#define psxBranchTest mipsrec_branch_test` renames the operand name and
- * value but leaves `%[psxBranchTest]` in the template pointing at a name
- * that no longer exists, and GCC rejects it ("undefined named operand
- * 'psxBranchTest'"). Falling through to rearmed's real psxBranchTest() avoids
- * that mismatch entirely and actually happens to link too; whether its
- * timing semantics are correct for mipsrec's call sites is a Phase 3/4
- * runtime-correctness question, out of scope here. */
+/* Seam 2b — cycle-seam branch test (Phase 3, GO LIVE).
+ *
+ * mipsrec's dispatch loops service the emulated-time horizon exactly like
+ * rearmed's own new_dynarec/lightrec do: when `psxRegs.cycle >=
+ * psxRegs.next_interupt` (io_cycle_counter alias, above), they jal a
+ * "branch test" that must (a) run any due events / raise IRQs, AND (b)
+ * recompute next_interupt to a value STRICTLY AHEAD of cycle so the loop
+ * makes forward progress. rearmed's *own* psxBranchTest() (r3000a.c:138) is
+ * the INTERPRETER's branch test and does NOT recompute next_interupt (no
+ * schedule_timeslice call) — routing the loop to it would leave next_interupt
+ * stale == cycle and spin forever (boot hang). The correct rearmed equivalent
+ * is gen_interupt() (psxevents.c:87 = irq_test + schedule_timeslice), which is
+ * precisely what ari64 (emu_if.c pcsx_mtc0) and lightrec (plugin.c:573) call
+ * at the same seam. So we point the loops at mipsrec_branch_test() (plugin.c),
+ * a thin gen_interupt() wrapper.
+ *
+ * We do NOT `#define psxBranchTest mipsrec_branch_test`: the vendored loops
+ * reference it as an inline-asm named operand — `[psxBranchTest]
+ * "i" (&psxBranchTest)` used in the template as `%[psxBranchTest]`. A #define
+ * would rewrite the operand *name* and *value* (ordinary tokens) but NOT the
+ * template string literal, leaving `%[psxBranchTest]` dangling ("undefined
+ * named operand"). Instead recompiler.cpp was edited surgically to keep the
+ * operand NAME `[psxBranchTest]` (so the template still resolves) while
+ * changing only the substituted VALUE to `&mipsrec_branch_test`. */
+void mipsrec_branch_test(void);
+
+/* Phase 3 — C-linkage wrappers exposing recompiler.cpp's file-static entry
+ * points to plugin.c's psxRec vtable. Defined (extern "C") at the bottom of
+ * recompiler.cpp; plugin.c also declares them itself (it does not include
+ * this header). Listed here for documentation / single source of truth. */
+int  mipsrec_rec_init(void);
+void mipsrec_rec_reset(void);
+void mipsrec_rec_execute(void);
+void mipsrec_rec_execute_block(unsigned pc);
+void mipsrec_rec_clear(u32 addr, u32 size);
+void mipsrec_rec_notify(int note, void *data);
+void mipsrec_rec_shutdown(void);
 
 /* Seam 3 — cache-isolate write gate. pcsx4all uses psxRegs.writeok;
  * rearmed tracks this in Config/psxmem differently. Map to a plugin-owned
