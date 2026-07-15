@@ -151,6 +151,12 @@ static void recSYSCALL()
 	LI32(TEMP_1, pc - 4);
 	SW(TEMP_1, PERM_REG_1, off(pc));
 
+	// rearmed's psxException(cause, bdt, psxCP0Regs *cp0) takes a THIRD arg:
+	// the CP0 pointer it writes Cause/EPC/SR through (pcsx4all's was 2-arg,
+	// operating on the global). Without a2, EPC lands at a garbage address and
+	// the real psxRegs.CP0.n.EPC stays stale -> handler saves 0 as the return
+	// PC -> jr 0 hang on the first syscall (shell EnterCriticalSection).
+	ADDIU(MIPSREG_A2, PERM_REG_1, offCP0(0)); // a2 = &psxRegs.CP0
 	LI16(MIPSREG_A1, (branch == 1 ? 1 : 0));
 	JAL(psxException);
 	LI16(MIPSREG_A0, 0x20); // <BD> Load first param using BD slot of JAL()

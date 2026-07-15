@@ -67,6 +67,11 @@ static void emitTestSWInts()
 	SW(TEMP_1, PERM_REG_1, off(pc));
 
 	regClearBranch();
+
+	// a2 = &psxRegs.CP0: rearmed's psxException(cause, bdt, psxCP0Regs *cp0)
+	// writes Cause/EPC/SR through this pointer (see recSYSCALL for the full
+	// rationale). a0 (cause) was set above; a1 goes in the BD slot below.
+	ADDIU(MIPSREG_A2, PERM_REG_1, offCP0(0));
 	JAL(psxException);
 
 	// Use JAL's BD slot to set arg telling if instruction lied in BD slot :)
