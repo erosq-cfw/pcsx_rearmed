@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include "out.h"
 
 #define MAX_OUT_DRIVERS 5
@@ -37,9 +38,15 @@ void SetupSound(void)
 #endif
 	}
 
-	for (i = 0; i < driver_count; i++)
+	/* ponytail: benchmark knob — PCSX_NOAUDIO forces the null driver so audio
+	 * consumption stops pacing the emulator to realtime (raw throughput A/B) */
+	const char *noaudio = getenv("PCSX_NOAUDIO");
+	for (i = 0; i < driver_count; i++) {
+		if (noaudio && strcmp(out_drivers[i].name, "none") != 0)
+			continue;
 		if (out_drivers[i].init() == 0)
 			break;
+	}
 
 	if (i < 0 || i >= driver_count) {
 		printf("the impossible happened\n");

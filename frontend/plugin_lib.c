@@ -816,6 +816,14 @@ void pl_frame_limit(void)
 
 		if (g_opts & OPT_SHOWFPS)
 			pl_rearmed_cbs.flips_per_sec = pl_rearmed_cbs.flip_cnt;
+		{ /* ponytail: env-gated perf probe for A/B dynarec fps, off unless PCSX_FPSLOG=1 */
+			static int fpslog = -1;
+			if (fpslog < 0)
+				fpslog = getenv("PCSX_FPSLOG") ? 1 : 0;
+			if (fpslog)
+				fprintf(stderr, "FPSLOG flips=%d vsps=%.1f\n",
+					pl_rearmed_cbs.flip_cnt, pl_rearmed_cbs.vsps_cur);
+		}
 		pl_rearmed_cbs.flip_cnt = 0;
 		if (g_opts & OPT_SHOWCPU)
 			pl_rearmed_cbs.cpu_usage = get_cpu_ticks();

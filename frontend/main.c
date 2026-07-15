@@ -595,6 +595,7 @@ int main(int argc, char *argv[])
 	const char *loadst_f = NULL;
 	int psxout = 0;
 	int loadst = 0;
+	int opt_nolimit = 0;
 	int i;
 
 	emu_core_preinit();
@@ -602,6 +603,12 @@ int main(int argc, char *argv[])
 	// read command line options
 	for (i = 1; i < argc; i++) {
 		     if (!strcmp(argv[i], "-psxout")) psxout = 1;
+		else if (!strcmp(argv[i], "-nolimit")) {
+			/* uncap raw throughput for perf A/B — applied after config
+			 * load below, since menu_init()/menu_prepare_emu() would
+			 * otherwise clobber these from the saved config */
+			opt_nolimit = 1;
+		}
 		else if (!strcmp(argv[i], "-load")) loadst = atol(argv[++i]);
 		else if (!strcmp(argv[i], "-cfg")) {
 			if (i+1 >= argc) break;
@@ -720,6 +727,13 @@ int main(int argc, char *argv[])
 	}
 	else
 		menu_loop();
+
+	if (opt_nolimit) {
+		/* applied here so config load can't clobber it (perf A/B) */
+		g_opts |= OPT_NO_FRAMELIM;
+		pl_rearmed_cbs.frameskip = -1;
+		fprintf(stderr, "perf: frame limiter OFF, frameskip AUTO (-nolimit)\n");
+	}
 
 #ifndef LIGHTREC_DEBUG
 	pl_start_watchdog();
