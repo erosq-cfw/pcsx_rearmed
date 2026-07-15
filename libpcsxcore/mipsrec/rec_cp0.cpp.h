@@ -88,85 +88,60 @@ static void emitTestSWInts()
 static void recMTC0()
 {
 // Cop0->Rd = Rt
+//
+// Route EVERY mtc0 through the interpreter's C helper
+//   void MTC0(struct psxRegisters *regs, int reg, u32 val)
+// (psxinterpreter.c). This is the ONLY way the emulator learns of the CP0
+// Status cache-isolate (IsC, bit 16) transition: MTC0() calls
+// psxMemOnIsolate() which swaps the write-LUT so isolated stores are dropped
+// instead of writing through to RAM. The previous hand-rolled per-register
+// emission wrote Status and tested SW ints but NEVER signalled isolation, so
+// the BIOS cache-flush loop's `sw $zero,...` stores reached main RAM and
+// zeroed the syscall handler stub at 0xb0 -> later jump to 0x0 -> hang.
+// Routing through MTC0() also fixes the separately-flagged setupCop()
+// (COP-enable) staleness and performs the SW-int/exception test, matching the
+// interpreter exactly for all CP0 registers.
+//
+// MTC0() -> psxTestSWInts(regs, 1) may (a) execute the instruction following
+// the mtc0 (step==1) and (b) raise a SW exception, either of which changes
+// psxRegs.pc. So this unconditionally ENDS THE BLOCK and returns the resulting
+// psxRegs.pc as $v0, using the same block-ending idiom as recSYSCALL().
 
+	// Load Rt into a host reg while the regcache is still live. regClearJump()
+	//  only rewrites regcache bookkeeping and flushes to memory; it does not
+	//  clobber the physical $s reg, so `rt`'s value survives to the MOV below.
 	u32 rt = regMipsToHost(_Rt_, REG_LOAD, REG_REGISTER);
-
-	switch (_Rd_) {
-		case 12: // Status
-			// Store new Status reg val, while also checking if new value
-			//  enables HW irqs/exceptions. Reset psxRegs.io_cycle_counter
-			//  if so, so that psxBranchTest() is called as soon as possible.
-
-			if (IsConst(_Rt_)) {
-				SW(rt, PERM_REG_1, offCP0(12)); // Store new CP0 Status reg val
-				if ((GetConst(_Rt_) & 0x401) == 0x401) {
-					SW(0, PERM_REG_1, off(io_cycle_counter));
-				}
-			} else {
-				ANDI(TEMP_1, rt, 0x401);
-				LI16(TEMP_2, 0x401);
-				u32 *backpatch = (u32 *)recMem;
-				BNE(TEMP_1, TEMP_2, 0);
-				SW(rt, PERM_REG_1, offCP0(12)); // <BD slot> Store new CP0 Status reg val
-				SW(0, PERM_REG_1, off(io_cycle_counter));
-				fixup_branch(backpatch);
-			}
-
-			// Modification of CP0 reg 12 or 13 must be followed by test for
-			//  software-generated IRQ/exception, unless value written is
-			//  known const val that would not generate one.
-			//  ** Fixes freeze at start of 'Jackie Chan Stuntmaster'
-
-			if (!IsConst(_Rt_) ||
-			    ((GetConst(_Rt_) & 0x300) && (GetConst(_Rt_) & 0x1))) {
-
-				// Load CP0 Cause reg (13), as emitTestSWInts() expects
-				//  Cause in MIPSREG_A0 and Status in MIPSREG_A1
-				LW(MIPSREG_A0, PERM_REG_1, offCP0(13));
-				MOV(MIPSREG_A1, rt);
-
-				emitTestSWInts();
-			}
-			break;
-
-		case 13: // Cause
-			// Only bits 8,9 are writable
-			// ---- Equivalent C code: ----
-			// u32 val = _Rt_;
-			// psxRegs.CP0.n.Cause &= ~0x300;
-			// psxRegs.CP0.n.Cause |= val & 0x300;
-
-			LW(MIPSREG_A0, PERM_REG_1, offCP0(13)); // MIPSREG_A0 = psxRegs.CP0.n.Cause
-
-#ifdef HAVE_MIPS32R2_EXT_INS
-			EXT(TEMP_1, rt, 8, 2);               // TEMP_1 = bits 9:8 of _Rt_
-			INS(MIPSREG_A0, TEMP_1, 8, 2);       // MIPSREG_A0 9:8 = bits 1:0 of TEMP_1
-#else
-			LI16(TEMP_1, 0x300);                 // TEMP_1 = 0x300
-			AND(TEMP_2, rt, TEMP_1);             // TEMP_2 = _Rt_ & 0x300
-			NOR(TEMP_1, 0, TEMP_1);              // TEMP_1 = ~0x300
-			AND(MIPSREG_A0, MIPSREG_A0, TEMP_1); // MIPSREG_A0 = psxRegs.CP0.n.Cause & ~0x300
-			OR(MIPSREG_A0, MIPSREG_A0, TEMP_2);  // MIPSREG_A0 |= (_Rt_ & 0x300)
-#endif
-			SW(MIPSREG_A0, PERM_REG_1, offCP0(13));
-
-			// See notes above regarding test for software-generated exception
-
-			if (!IsConst(_Rt_) || (GetConst(_Rt_) & 0x300)) {
-				// Load CP0 Status reg (12), as emitTestSWInts() expects
-				//  Cause in MIPSREG_A0 and Status in MIPSREG_A1
-				LW(MIPSREG_A1, PERM_REG_1, offCP0(12));
-
-				emitTestSWInts();
-			}
-			break;
-
-		default:
-			SW(rt, PERM_REG_1, offCP0(_Rd_));
-			break;
-	}
-
 	regUnlock(rt);
+
+	// Flush all mapped PS1 GPRs to psxRegs.GPR and tear down the regcache, so
+	//  the interpreter opcode that psxTestSWInts(step=1) may execute sees
+	//  up-to-date GPR values in memory (block ends here, like recSYSCALL()).
+	regClearJump();
+
+	// psxRegs.pc must point at the instruction AFTER the mtc0. The recompiler
+	//  global `pc` was already advanced by +4 in recRecompile() before this
+	//  emitter ran, so it holds exactly that address. The interpreter likewise
+	//  advances pc before invoking its MTC0 handler; MTC0()->psxTestSWInts(1)
+	//  then steps the opcode at psxRegs.pc if a SW irq is pending.
+	LI32(TEMP_1, pc);
+	SW(TEMP_1, PERM_REG_1, off(pc));
+
+	// MTC0(&psxRegs, _Rd_, rt)  — o32 args a0/a1/a2 = $4/$5/$6
+	MOV(MIPSREG_A0, PERM_REG_1);   // a0 = &psxRegs (PERM_REG_1 holds it)
+	LI16(MIPSREG_A1, _Rd_);        // a1 = CP0 register number (compile-time const)
+	JAL(MTC0);
+	MOV(MIPSREG_A2, rt);           // <BD slot> a2 = value to write
+
+	// New PC is not known at compile time -> cannot use 'fastpath' return.
+	const bool use_fastpath_return = false;
+
+	rec_recompile_end_part1();
+
+	LW(MIPSREG_V0, PERM_REG_1, off(pc)); // Block retval $v0 = psxRegs.pc set by MTC0()
+
+	rec_recompile_end_part2(use_fastpath_return);
+
+	end_block = 1;
 }
 
 static void recCTC0()

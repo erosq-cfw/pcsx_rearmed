@@ -71,6 +71,16 @@ u32  sioRead32(void);
 void sioWrite16(u16 value);
 void sioWrite32(u32 value);
 
+/* Seam 1d — interpreter's CP0 Move-To-Coprocessor helper. recMTC0()
+ * (rec_cp0.cpp.h) routes every mtc0 through this so a write to the Status
+ * register drives psxMemOnIsolate() on the cache-isolate (IsC) transition,
+ * setupCop() on a COP-enable change, and the SW-int/exception test — exactly
+ * as psxinterpreter.c does. Defined non-static (C linkage) in
+ * psxinterpreter.c; also declared in psxinterpreter.h, but that header isn't
+ * pulled into this C++ TU, so re-declare it here inside the extern "C" block
+ * to get the un-mangled symbol. Signature must match psxinterpreter.c. */
+void MTC0(struct psxRegisters *regs, int reg, u32 val);
+
 /* Seam 1c — bare `psxH` pointer. pcsx4all keeps a top-level `extern s8
  * *psxH;`; rearmed keeps the same pointer inside psxRegs.ptrs. Only
  * rec_lsu_hw.cpp.h's const_hw_loads_stores() uses the bare name. */
