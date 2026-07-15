@@ -55,9 +55,16 @@ void mipsrec_write32(u32 addr, u32 val);
  * omits. rec_lsu_hw.cpp.h and rec_gte.cpp.h JAL these by pcsx4all's original
  * (undivided) names/signatures (see pcsx4all/src/psxcounters.h, sio.h).
  * rearmed only has psxRcntRcount0/1/2 (no generic indexed reader) and no
- * 16/32-bit sio read/write helpers at all. Declare them here so recompiler.o
- * compiles; plugin.c supplies the bodies in a later phase. Undefined at link
- * time until then — expected. */
+ * 16/32-bit sio read/write helpers at all. Declared here so recompiler.o
+ * compiles; plugin.c supplies the bodies (Task 2.1). Every OTHER pcsx4all
+ * HW/sio/counter call-out referenced by rec_lsu_hw.cpp.h already has a
+ * same-name, same-signature rearmed counterpart pulled in transitively by
+ * the includes above — no shim needed: psxHwRead8/16/32, psxHwWrite8/16/32
+ * (psxhw.h), sioRead8/sioWrite8 + sioRead/WriteStat/Mode/Ctrl/Baud16 (sio.h),
+ * psxRcntWcount/Wmode/Wtarget/Rmode/Rtarget (psxcounters.h), cdrRead/Write0-3
+ * (cdrom.h), mdecRead/Write0/1 (mdec.h), GPU_read/writeData and
+ * SPU_read/writeRegister (function-pointer variables from plugins.h,
+ * assigned identically whether JAL'd by name or by pointer variable). */
 u32  psxRcntRcount(u32 index);
 u16  sioRead16(void);
 u32  sioRead32(void);
@@ -158,12 +165,19 @@ extern int mipsrec_writeok;
 #define _JumpTarget_    ((_Target_ * 4) + (_PC_ & 0xf0000000))
 #define _BranchTarget_  ((s16)_Im_ * 4 + _PC_)
 
-/* Seam 5 — pcsx4all interpreter-internal helper with no rearmed equivalent.
- * rec_bcu.cpp.h's load-delay-hazard-across-branch detection calls this
- * (pcsx4all/src/psxinterpreter.cpp's psxTestLoadDelay(), also pcsx4all-only).
- * Declared so recompiler.o compiles; undefined at link time until a later
- * phase ports or reimplements it. */
+/* Seam 5 — pcsx4all interpreter-internal helpers with no rearmed equivalent.
+ * rec_bcu.cpp.h's load-delay-hazard-across-branch detection
+ * (execBranchLoadDelay/DelayTest/recBLEZ/recBLTZ/etc.) calls psxTestLoadDelay()
+ * (pcsx4all/src/psxinterpreter.cpp) AND, when a hazard is found, falls back
+ * to actually executing the delay-slot opcode through pcsx4all's classic
+ * per-primary-opcode interpreter dispatch table `psxBSC[64]`
+ * (pcsx4all/src/psxinterpreter.cpp:64/867) — both pcsx4all-only. Declared so
+ * recompiler.o compiles; confirmed still undefined at Task 2.1's full
+ * (--no-gc-sections) link — these are the ONLY two undefined symbols found,
+ * both pre-existing/out-of-scope for Task 2.1 (memory+GTE), deferred to
+ * whichever later phase ports real branch/load-delay dispatch. */
 int psxTestLoadDelay(int reg, u32 tmp);
+extern void (*psxBSC[64])(void);
 
 /* Seam 6 — pcsx4all-only R3000Anote value. rec_set_options()'s DMA3-EXE-load
  * Formula-One workaround switches on this; rearmed's `enum R3000Anote` (in
@@ -172,11 +186,56 @@ int psxTestLoadDelay(int reg, u32 tmp);
  * simply never reached until a later phase teaches psxDma3() to send it. */
 #define R3000ACPU_NOTIFY_DMA3_EXE_LOAD 100
 
-/* GTE: pcsx4all rec_gte.cpp.h JALs to gteRTPS/gteNCLIP/etc; it declares its
- * own `extern void gteXXX(...)` prototypes locally via its CP2_FUNC_0/1
- * macros, so no declarations are needed here. rearmed has one dispatch
- * (gteDispatch); plugin.c will provide thin gteXXX shims that call it
- * (Task 2/GTE). */
+/* GTE (Task 2.1): pcsx4all's rec_gte.cpp.h JALs to gteRTPS/gteNCLIP/etc.
+ * Its CP2_FUNC_0/CP2_FUNC_1 macros (rec_gte.cpp.h:27-45) locally declare
+ * `extern void gteXXX(...)` right before emitting each JAL. Inside
+ * recompiler.cpp (a C++ TU) an unadorned `extern` declaration like that
+ * gets C++ (mangled) linkage; plugin.c defines these functions as plain C
+ * (unmangled), so without action here the link fails with undefined
+ * references to the *mangled* names.
+ *
+ * Fix chosen (the cleaner of the two options considered): predeclare every
+ * gteXXX symbol here, inside this header's extern "C" block, which is
+ * `#include`d at the very top of recompiler.cpp — i.e. before rec_gte.cpp.h
+ * runs its own CP2_FUNC_0/1 macros. Language linkage is a property of the
+ * entity fixed by its *first* declaration; a later plain
+ * `extern void gteXXX();` with no explicit linkage spec (rec_gte.cpp.h's)
+ * does not change that — it just redeclares the same extern-"C" entity.
+ * So no edit to the vendored rec_gte.cpp.h is needed at all.
+ *
+ * Two arities, exactly matching the CP2_FUNC_0 / CP2_FUNC_1 split (verified
+ * via `grep -o 'gte[A-Z][A-Za-z0-9]*' rec_gte.cpp.h | sort -u` against every
+ * CP2_FUNC_0(...)/CP2_FUNC_1(...) invocation in that file):
+ *  - CP2_FUNC_0 (14 ops, NO argument — JAL emitted with a NOP delay slot,
+ *    nothing placed in $a0): RTPS NCLIP NCDS NCDT CDP NCCS CC NCS NCT DPCT
+ *    AVSZ3 AVSZ4 RTPT NCCT.
+ *  - CP2_FUNC_1 (8 ops, ONE u32 argument — the delay slot instead holds
+ *    `LI16(A0, (u16)(psxRegs.code >> 10))`, baked in at *recompile* time):
+ *    OP DPCS INTPL MVMVA SQR DCPL GPF GPL.
+ * plugin.c supplies the bodies (each delegating to rearmed's gteDispatch()). */
+void gteRTPS(void);
+void gteNCLIP(void);
+void gteNCDS(void);
+void gteNCDT(void);
+void gteCDP(void);
+void gteNCCS(void);
+void gteCC(void);
+void gteNCS(void);
+void gteNCT(void);
+void gteDPCT(void);
+void gteAVSZ3(void);
+void gteAVSZ4(void);
+void gteRTPT(void);
+void gteNCCT(void);
+
+void gteOP(u32 gteop);
+void gteDPCS(u32 gteop);
+void gteINTPL(u32 gteop);
+void gteMVMVA(u32 gteop);
+void gteSQR(u32 gteop);
+void gteDCPL(u32 gteop);
+void gteGPF(u32 gteop);
+void gteGPL(u32 gteop);
 
 #ifdef __cplusplus
 }

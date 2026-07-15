@@ -81,8 +81,24 @@
 /* Const propagation is extended to optimize 'fuzzy' non-const addresses */
 #define USE_CONST_FUZZY_ADDRESSES
 
-/* Generate inline memory access or call psxMemRead/Write C functions */
+/* Generate inline memory access or call psxMemRead/Write C functions.
+ *
+ * EROSQ/rearmed Task 2.1: this phase is deliberately "correctness-first" —
+ * ALL PS1 memory access goes through call-outs to rearmed's real
+ * psxMemRead/Write* (see compat.h Seam 1 + plugin.c's mipsrec_read/write*),
+ * not inlined/mmap'd fastmem (that's Phase 6, mem_mapping.h, not vendored
+ * yet — see the "EROSQ/rearmed port" note below). MIPSREC is unconditionally
+ * defined for this backend (Makefile: `CFLAGS += -DMIPSREC`), so this
+ * #define is compiled out here, forcing rec_lsu.cpp.h's `emit_direct=false;
+ * emit_indirect=true` branch (rec_lsu.cpp.h:584-592) — the whole direct/
+ * mmap'd-RAM code path (including every `psx_mem_mapped` read) becomes
+ * provably-dead code, so psx_mem_mapped (declared below, never set true
+ * since USE_VIRTUAL_PSXMEM_MAPPING below also requires this) stays
+ * constant-false. Left ungated (i.e. still defined) if this file is ever
+ * vendored again outside the MIPSREC/rearmed backend. */
+#ifndef MIPSREC
 #define USE_DIRECT_MEM_ACCESS
+#endif
 
 /* Virtual memory mapping options: */
 #if defined(SHMEM_MIRRORING) || defined(TMPFS_MIRRORING)

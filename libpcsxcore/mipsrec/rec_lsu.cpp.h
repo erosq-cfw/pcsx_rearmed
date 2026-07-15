@@ -37,7 +37,19 @@
 //       defined elsewhere.
 
 // Inline access to known-const HW,Scratchpad addresses (see rec_lsu_hw.cpp.h)
+//
+// EROSQ/rearmed Task 2.1: undefined for the MIPSREC backend (see matching
+// note by USE_DIRECT_MEM_ACCESS in recompiler.cpp) to keep this phase on the
+// call-out-only "indirect" path. This only removes ONE of the two routes
+// into rec_lsu_hw.cpp.h's const_hw_loads_stores() (the const-address
+// fast-path check at rec_lsu.cpp.h ~1410); emitOptimizedStaticLoad()'s own
+// call to it (~1544) is NOT guarded by this macro and stays reachable
+// either way — so every psxHwRead/Write*, sioRead/Write*, cdrRead/Write*,
+// mdecRead/Write*, psxRcntR*/W*, GPU_*Data, SPU_*Register call-out in that
+// file must resolve regardless of this #define (see compat.h Seam 1b).
+#ifndef MIPSREC
 #define USE_DIRECT_HW_ACCESS
+#endif
 
 // Assume that stores using $k0,$k1,$gp,$sp as base registers aren't used
 //  to modify code. Code invalidation sequence will not be emitted.
