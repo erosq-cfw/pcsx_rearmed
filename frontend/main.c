@@ -117,6 +117,14 @@ void emu_set_default_config(void)
 	Config.AlternativeFlip = -1;
 
 	pl_rearmed_cbs.dithering = 1;
+#ifdef EROSQ
+	// invisible on the 320x240 panel and it costs per-pixel work; also
+	// keeps gouraud/lit spans on the MXU fast paths (EROSQ_DITHER=1 to A/B)
+	{
+		const char *ed = getenv("EROSQ_DITHER");
+		pl_rearmed_cbs.dithering = ed ? atoi(ed) : 0;
+	}
+#endif
 	pl_rearmed_cbs.gpu_neon.allow_interlace = 2; // auto
 	pl_rearmed_cbs.gpu_neon.enhancement_enable =
 	pl_rearmed_cbs.gpu_neon.enhancement_no_main = 0;
