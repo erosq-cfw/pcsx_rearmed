@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <signal.h>
 #include <linux/input.h>
 
 #include "libpicofe/input.h"
@@ -98,6 +99,31 @@ static uint16_t *drm_buf;    /* mapped 320x240 RGB565 scanout */
 static int drm_stride;       /* scanout row stride in pixels */
 static int psx_w = 320, psx_h = 240;
 
+/* ponytail: SIGUSR1 -> dump current PSX frame (shadow_fb, RGB565) as a PPM so
+ * headless perf runs can SEE the game state. Debug tool; flag set in handler,
+ * write happens in the flip path (not signal context). writepng is stubbed
+ * (no libpng) in this build, so PPM keeps it dependency-free. */
+static volatile sig_atomic_t g_want_shot;
+static void shot_handler(int sig) { (void)sig; g_want_shot = 1; }
+static void dump_ppm(const uint16_t *src, int w, int h)
+{
+	FILE *f = fopen("/media/sd/psx/shot.ppm", "wb");
+	int i, n = w * h;
+	if (!f) return;
+	fprintf(f, "P6\n%d %d\n255\n", w, h);
+	for (i = 0; i < n; i++) {
+		uint16_t p = src[i];
+		unsigned char rgb[3] = {
+			(unsigned char)(((p >> 11) & 0x1f) << 3),
+			(unsigned char)(((p >> 5)  & 0x3f) << 2),
+			(unsigned char)(( p        & 0x1f) << 3),
+		};
+		fwrite(rgb, 1, 3, f);
+	}
+	fclose(f);
+	fprintf(stderr, "shot: wrote /media/sd/psx/shot.ppm %dx%d\n", w, h);
+}
+
 static void get_layer_pos(int *x, int *y, int *w, int *h)
 {
 	*x = 0; *y = 0; *w = PANEL_W; *h = PANEL_H;
@@ -144,6 +170,8 @@ void plat_init(void)
 	}
 	drm_buf = drm_pixels(&drm_stride);
 
+	signal(SIGUSR1, shot_handler);   /* ponytail: kill -USR1 -> shot.ppm */
+
 	in_evdev_init(&erosq_evdev_pdata);
 	in_probe();
 
@@ -173,6 +201,7 @@ void *plat_gvideo_set_mode(int *w, int *h, int *bpp)
 void *plat_gvideo_flip(void)
 {
 	present_scaled(shadow_fb, psx_w, psx_h);
+	if (g_want_shot) { g_want_shot = 0; dump_ppm(shadow_fb, psx_w, psx_h); }
 	/* EROSQ_VID_LOG=1: confirm the frame path is live without a human watching */
 	if (getenv("EROSQ_VID_LOG")) {
 		static unsigned long n;
