@@ -83,22 +83,19 @@
 
 /* Generate inline memory access or call psxMemRead/Write C functions.
  *
- * EROSQ/rearmed Task 2.1: this phase is deliberately "correctness-first" —
- * ALL PS1 memory access goes through call-outs to rearmed's real
- * psxMemRead/Write* (see compat.h Seam 1 + plugin.c's mipsrec_read/write*),
- * not inlined/mmap'd fastmem (that's Phase 6, mem_mapping.h, not vendored
- * yet — see the "EROSQ/rearmed port" note below). MIPSREC is unconditionally
- * defined for this backend (Makefile: `CFLAGS += -DMIPSREC`), so this
- * #define is compiled out here, forcing rec_lsu.cpp.h's `emit_direct=false;
- * emit_indirect=true` branch (rec_lsu.cpp.h:584-592) — the whole direct/
- * mmap'd-RAM code path (including every `psx_mem_mapped` read) becomes
- * provably-dead code, so psx_mem_mapped (declared below, never set true
- * since USE_VIRTUAL_PSXMEM_MAPPING below also requires this) stays
- * constant-false. Left ungated (i.e. still defined) if this file is ever
- * vendored again outside the MIPSREC/rearmed backend. */
-#ifndef MIPSREC
+ * EROSQ/rearmed Phase 6 (fastmem): direct inline RAM loads/stores are now
+ * ENABLED. Because SHMEM_MIRRORING/TMPFS_MIRRORING stay undefined below,
+ * psx_mem_mapped is constant-false, so emitAddressConversion() takes METHOD 2
+ * (rec_lsu.cpp.h:274): host_addr = psxRegs.ptrs.psxM + (guest & 0x1fffff),
+ * a masked base-relative access against rearmed's own psxM. Hardware-I/O /
+ * scratchpad / BIOS accesses still take the indirect psxMemRead/Write callout
+ * (chosen per-series by the runtime range check + the const/fuzzy-addr
+ * classifiers). SMC invalidation is emitted inline (SW 0, recRAM[...]) — the
+ * same recRAM slot the LUT dispatch reads. Cache-isolation safety: direct
+ * stores skip the writeok guard (SKIP_WRITEOK_CHECK), so recNotify() backs up
+ * & restores the low 64KB of RAM across isolation (see ram_bak below), matching
+ * pcsx4all's psxMemWrite32_CacheCtrlPort mechanism. */
 #define USE_DIRECT_MEM_ACCESS
-#endif
 
 /* Virtual memory mapping options: */
 #if defined(SHMEM_MIRRORING) || defined(TMPFS_MIRRORING)
@@ -189,6 +186,12 @@ static u8 code_pages[0x200000/4096/8];
 static s8 *recRAM;
 static s8 *recROM;
 static uptr psxRecLUT[0x10000];
+
+/* fastmem: direct stores skip the writeok/cache-isolation guard, so we back up
+ * the low 64KB of PS1 RAM on cache-isolate and restore it on un-isolate (the
+ * i-cache-flush idiom trashes low RAM while isolated). Mirrors pcsx4all's
+ * mem_bak in psxMemWrite32_CacheCtrlPort(); handled in recNotify(). */
+static u32 ram_bak[0x10000 / 4];
 
 #undef PC_REC
 #undef PC_REC8
@@ -1759,11 +1762,12 @@ static void recNotify(int note, void *data __attribute__((unused)))
 		 *  Sent from psxMemWrite32_CacheCtrlPort(). Also see notes there.
 		 */
 		case R3000ACPU_NOTIFY_CACHE_ISOLATED:
-			/*  There's no need to do anything here:
-			 * psxMemWrite32_CacheCtrlPort() has backed up lower 64KB PS1 RAM,
-			 * allowing stores in emitted code to skip checking if cache
-			 * is isolated before writing to RAM (the old 'writeok' check).
+			/*  Back up lower 64KB PS1 RAM. Emitted direct stores skip the
+			 * 'writeok' check (SKIP_WRITEOK_CHECK), so the i-cache-flush idiom
+			 * trashes low RAM while the cache is isolated; we revert it below.
+			 * (rearmed has no psxMemWrite32_CacheCtrlPort; we do it here.)
 			 */
+			memcpy(ram_bak, psxRegs.ptrs.psxM, sizeof(ram_bak));
 			REC_LOG_V("R3000ACPU_NOTIFY_CACHE_ISOLATED\n");
 			break;
 		case R3000ACPU_NOTIFY_CACHE_UNISOLATED:
@@ -1778,6 +1782,7 @@ static void recNotify(int note, void *data __attribute__((unused)))
 			 *  provide an option to allow emitted code to skip most code
 			 *  invalidations after stores, boosting speed.
 			 */
+			memcpy(psxRegs.ptrs.psxM, ram_bak, sizeof(ram_bak));  /* revert isolated-write trash */
 			recClear(0, 0x200000/4);
 			REC_LOG_V("R3000ACPU_NOTIFY_CACHE_UNISOLATED\n");
 			break;
