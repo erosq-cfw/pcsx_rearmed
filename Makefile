@@ -215,9 +215,13 @@ else ifeq "$(DYNAREC)" "mipsrec"
 # guards added there (same treatment LIGHTREC gets).
 CFLAGS += -DMIPSREC
 OBJS += libpcsxcore/mipsrec/plugin.o
-# vendored recompiler objects added in Phase 1:
-# OBJS += libpcsxcore/mipsrec/recompiler.o libpcsxcore/mipsrec/mips_codegen.o \
-#         libpcsxcore/mipsrec/host_asm.o
+# Vendored recompiler tree (Phase 1: compiles, not yet wired into plugin.c —
+# that's Phase 3). recompiler.cpp and mips_codegen.cpp are C++ (built via the
+# generic '%.o: %.cpp' rule above); the rec_*.cpp.h/opcodes.h/regcache.h
+# emitter headers are #included INTO recompiler.cpp, not separate TUs.
+# host_asm.o is the lone MIPS32r2 asm helper.
+OBJS += libpcsxcore/mipsrec/recompiler.o libpcsxcore/mipsrec/mips_codegen.o \
+        libpcsxcore/mipsrec/host_asm.o
 else ifeq "$(DYNAREC)" "ari64"
  OBJS += libpcsxcore/new_dynarec/new_dynarec.o
  OBJS += libpcsxcore/new_dynarec/pcsxmem.o
