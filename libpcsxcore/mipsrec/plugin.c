@@ -286,12 +286,36 @@ void sioWrite32(u32 value)
 #define GTE_LM_BIT (1u << 10)
 
 /* GTE_SHIM0_LM1: no-arg op with sf=1, lm=1.  GTE_SHIM0_LM0: sf=1, lm=0.
- * (See the per-op lm split documented in the comment block above.) */
+ * (See the per-op lm split documented in the comment block above.)
+ *
+ * The no-arg shims have a compile-time-constant `code`, so gteGetHandler(code)
+ * is a constant — resolve it ONCE and call the handler directly, exactly as
+ * pcsx4all JALs straight to the op. This drops the gteDispatch() call frame
+ * and gteGetHandler's per-call op/modifier recompute from the hottest GTE ops
+ * (RTPS/RTPT/NCLIP/NCDS run per-vertex/per-poly in every 3D title). Behaviour
+ * is identical: same handler, same `code` argument. Single-threaded, so the
+ * static cache needs no guard. One-arg ops (MVMVA etc.) keep gteDispatch — the
+ * modifier bits come from the runtime arg, so the handler isn't constant.
+ *
+ * NB: measured negligible (<0.5%, below scene noise even at ~130k GTE ops/s on
+ * Crash gameplay) — GTE dispatch was never the pcsx4all gap; that was GPU fill
+ * + uncached present (see the erosq perf commit). Kept because it is correct,
+ * general, and strictly leaner than routing every op through gteDispatch. */
 #define GTE_SHIM0_LM1(NAME, OPVAL) \
-	void gte##NAME(void) { gteDispatch(&psxRegs.CP2, (u32)(OPVAL) | GTE_SF_BIT | GTE_LM_BIT); }
+	void gte##NAME(void) { \
+		static gte_handler *h; \
+		const u32 code = (u32)(OPVAL) | GTE_SF_BIT | GTE_LM_BIT; \
+		if (!h) h = gteGetHandler(code); \
+		h(&psxRegs.CP2, code); \
+	}
 
 #define GTE_SHIM0_LM0(NAME, OPVAL) \
-	void gte##NAME(void) { gteDispatch(&psxRegs.CP2, (u32)(OPVAL) | GTE_SF_BIT); }
+	void gte##NAME(void) { \
+		static gte_handler *h; \
+		const u32 code = (u32)(OPVAL) | GTE_SF_BIT; \
+		if (!h) h = gteGetHandler(code); \
+		h(&psxRegs.CP2, code); \
+	}
 
 #define GTE_SHIM1(NAME, OPVAL) \
 	void gte##NAME(u32 gteop) { gteDispatch(&psxRegs.CP2, (u32)(OPVAL) | ((gteop & 0xffffu) << 10)); }
