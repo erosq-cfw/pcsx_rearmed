@@ -352,7 +352,12 @@ static void menu_set_defconfig(void)
 	g_scaler = SCALE_4_3;
 	g_gamma = 100;
 	volume_boost = 0;
-#ifdef MIYOO
+#if defined(MIYOO) || defined(EROSQ)
+	/* GPU-less handhelds: the CPU rasterizes every pixel and can't sustain 60
+	 * fps of rendering on heavy 3D games (e.g. GT2 at 368x480). With frameskip
+	 * OFF the emulator falls behind and the whole game runs in slow-motion with
+	 * pitched-down audio; AUTO keeps emulation at full 60Hz by dropping only
+	 * rendered frames when behind (no downside on games that keep up). */
 	frameskip = 0; // 0 - auto
 #else
 	frameskip = 1; // 1 - off
