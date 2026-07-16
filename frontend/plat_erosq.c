@@ -239,6 +239,41 @@ static void present_scaled(const uint16_t *src, int sw, int sh)
 	if (g_prof_on) g_prof_present_ns += prof_now_ns() - _t0;
 }
 
+/* ponytail: pin the CPU governor to 'performance' for the emulator's lifetime.
+ * Measured: ondemand drops cpu0 to 504MHz (half clock) on ~30% of capped frames
+ * because it reads the per-frame present/vsync wait as idle, stuttering heavy
+ * scenes. Save the prior governor, restore on exit (plat_finish + atexit backstop
+ * for hard exits). EROSQ_NOGOV=1 disables. */
+#define GOV_PATH "/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"
+static char g_saved_gov[32];
+static void gov_write(const char *g)
+{
+	FILE *f = fopen(GOV_PATH, "w");
+	if (!f) return;
+	fputs(g, f);
+	fclose(f);
+}
+static void gov_restore(void)
+{
+	if (g_saved_gov[0]) { gov_write(g_saved_gov); g_saved_gov[0] = 0; }
+}
+static void gov_pin_performance(void)
+{
+	FILE *f;
+	char *nl;
+	if (getenv("EROSQ_NOGOV")) return;
+	f = fopen(GOV_PATH, "r");
+	if (!f) return;
+	if (fgets(g_saved_gov, sizeof g_saved_gov, f)) {
+		nl = strchr(g_saved_gov, '\n'); if (nl) *nl = 0;
+	}
+	fclose(f);
+	if (strcmp(g_saved_gov, "performance") == 0) { g_saved_gov[0] = 0; return; }
+	gov_write("performance");
+	atexit(gov_restore);
+	fprintf(stderr, "gov: pinned performance (was '%s')\n", g_saved_gov);
+}
+
 void plat_init(void)
 {
 	int shadow_size = 1024 * 512 * 2;   /* max PSX hi-res, matches plat_sdl */
@@ -265,6 +300,7 @@ void plat_init(void)
 	signal(SIGUSR1, shot_handler);   /* ponytail: kill -USR1 -> shot.ppm */
 	g_prof_on = getenv("EROSQ_PROF") ? 1 : 0;
 	sampler_init();
+	gov_pin_performance();
 
 	in_evdev_init(&erosq_evdev_pdata);
 	in_probe();
@@ -275,6 +311,7 @@ void plat_init(void)
 
 void plat_finish(void)
 {
+	gov_restore();
 	drm_close();
 	free(shadow_fb);    shadow_fb = NULL;
 	free(menu_fb);      menu_fb = NULL;
