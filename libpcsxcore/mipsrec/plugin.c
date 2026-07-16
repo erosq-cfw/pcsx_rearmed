@@ -75,9 +75,26 @@ static void mipsrec_execute_block(struct psxRegisters *regs, enum blockExecCalle
 	 * no-op dummy (no frame ever presented -> black screen, though CPU+SPU ran).
 	 * The retail BIOS always hands off to the shell at exactly 0x80030000 (which
 	 * psxReset itself checks for), and boot stays in ROM until then, so target
-	 * that for the boot caller; softcalls keep the run-to-return semantics. */
-	u32 target = (c == EXEC_CALLER_BOOT) ? 0x80030000u : regs->pc;
-	mipsrec_rec_execute_block(target);
+	 * that for the boot caller.
+	 *
+	 * Non-boot callers (HLE softCall()/softCallInException() in psxbios.c, the
+	 * GPU debug frame-step in menu.c) expect "run one short unit, return" and
+	 * poll their own exit condition between calls -- softCall's is the
+	 * 0x80001000 ra-sentinel OR returned_from_exception(), a multi-value exit
+	 * recExecuteBlock's single run-to-target-pc primitive cannot express (and
+	 * it has no .stop guard, so a missed target = hard hang). Delegate those
+	 * to the interpreter like the callers assume: correctness over speed on a
+	 * path that runs a handful of blocks per callback. intApplyConfig() (see
+	 * mipsrec_apply_config) has set up regs->ptrs.intFetch before any of this
+	 * can run. The BEFORE_SAVE notify flushes the interpreter's load-delay
+	 * pipeline (dloadReg) so no delayed load is dropped when recompiled code
+	 * resumes. */
+	if (c == EXEC_CALLER_BOOT) {
+		mipsrec_rec_execute_block(0x80030000u);
+	} else {
+		psxInt.ExecuteBlock(regs, c);
+		psxInt.Notify(R3000ACPU_NOTIFY_BEFORE_SAVE, NULL);
+	}
 }
 
 static void mipsrec_clear(u32 addr, u32 size) { mipsrec_rec_clear(addr, size); }
@@ -101,7 +118,13 @@ static void mipsrec_notify(enum R3000Anote note, void *data)
 		break;
 	case R3000ACPU_NOTIFY_AFTER_LOAD:
 	case R3000ACPU_NOTIFY_AFTER_LOAD_STATE:
-		mipsrec_rec_reset();
+		/* data == NULL: full RAM/state reload (savestate, disc/BIOS load) --
+		 * every recompiled block is stale, flush. data != NULL: the cheap
+		 * per-softcall HLE sync from psxbios.c; mipsrec keeps no cached CPU
+		 * state outside psxRegs, so nothing to do (a full flush here would
+		 * re-JIT the world on every BIOS callback). Matches lightrec. */
+		if (data == NULL)
+			mipsrec_rec_reset();
 		break;
 	case R3000ACPU_NOTIFY_BEFORE_SAVE:
 	default:
@@ -109,7 +132,33 @@ static void mipsrec_notify(enum R3000Anote note, void *data)
 	}
 }
 
-static void mipsrec_apply_config(void) { /* Phase 4 */ }
+/* recompiler.cpp's per-block cycle charge, 24.8 fixed point (0x100 = 1.00
+ * cycles/instruction). Baked into blocks at recompile time by ADJUST_CLOCK
+ * (mips_codegen.h), so changing it requires a code-cache flush. */
+extern u32 cycle_multiplier;
+
+static void mipsrec_apply_config(void)
+{
+	/* Same source resolution as lightrec_plugin_apply_config(): the per-game
+	 * database override wins unless the user moved the CPU-clock% slider off
+	 * the default. Config values are percent (175 = 1.75). */
+	u32 mult_percent =
+		(Config.cycle_multiplier_override &&
+		 Config.cycle_multiplier == CYCLE_MULT_DEFAULT)
+			? (u32)Config.cycle_multiplier_override
+			: (u32)Config.cycle_multiplier;
+	u32 mult_fp = (mult_percent << 8) / 100;
+
+	if (mult_fp && mult_fp != cycle_multiplier) {
+		cycle_multiplier = mult_fp;
+		mipsrec_rec_reset();  /* blocks bake the old multiplier */
+	}
+
+	/* Keep the interpreter's dispatch tables/fetch pointers in sync, exactly
+	 * as lightrec does: mipsrec_execute_block() delegates HLE softcalls and
+	 * debug stepping to psxInt, which needs regs->ptrs.intFetch set. */
+	intApplyConfig();
+}
 static void mipsrec_shutdown(void)     { mipsrec_rec_shutdown(); }
 
 R3000Acpu psxRec = {

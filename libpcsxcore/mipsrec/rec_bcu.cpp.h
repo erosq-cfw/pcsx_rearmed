@@ -659,6 +659,13 @@ static void recBLTZAL()
 	u32 nbpc = pc + 4;
 
 	if (!(_Rs_)) {
+		// 'bltzal $zero' never branches, but branch-and-link writes 'ra'
+		//  even when not taken (see emitBxxZ) -- an idiom for reading pc+8.
+		const u32 ra = regMipsToHost(31, REG_FIND, REG_REGISTER);
+		emitJumpAndLinkReturnAddress(ra, nbpc);
+		regUnlock(ra);
+		SetConst(31, nbpc);
+		regMipsChanged(31);
 		recDelaySlot();
 		return;
 	}

@@ -1745,6 +1745,17 @@ static void recClear(u32 Addr, u32 Size)
 {
 	const u32 masked_ram_addr = Addr & 0x1ffffc;
 
+	// Callers pass unsanitized sizes: misc.c passes size/4 (0 for tiny EXE
+	//  sections), and cdrom.c's psxDma3 passes the raw DMA word count
+	//  unclamped (up to 0x10000 words -- "GS CDX" spams exactly that). A
+	//  Size of 0 would wrap (Size-1) below; an unclamped end would run the
+	//  page scan and memset past the 2MB RAM's code_pages[]/recRAM bounds.
+	if (Size == 0)
+		return;
+	const u32 max_words = (0x200000 - masked_ram_addr) / 4;
+	if (Size > max_words)
+		Size = max_words;
+
 	// Check if the page(s) of PS1 RAM that 'Addr','Size' target contain the
 	//  start of any blocks. If not, invalidation would have no effect and is
 	//  skipped. This eliminates 99% of large unnecessary invalidations that

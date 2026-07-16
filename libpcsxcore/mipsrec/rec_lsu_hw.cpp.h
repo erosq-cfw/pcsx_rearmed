@@ -573,6 +573,19 @@ static bool emit_const_hw_load(u32 addr, u32 r2, u32 opcode, bool *C_func_called
 					move_result_out_of_v0 = true;
 					break;
 
+				case 0x1c00 ... 0x1dff: // SPU reg
+					// Route through psxHwRead8: it does the odd/even byte
+					//  select of the 16-bit SPU register and passes
+					//  psxRegs.cycle to the SPU plugin internally. A raw
+					//  psxH[] load here would return stale data (SPU regs
+					//  are computed on read).
+					LUI(MIPSREG_A0, 0x1f80);
+					JAL(psxHwRead8);
+					ORI(MIPSREG_A0, MIPSREG_A0, lower);  // <BD>
+					*C_func_called = true;
+					move_result_out_of_v0 = true;
+					break;
+
 				default:
 					direct = true;
 					break;
@@ -696,10 +709,14 @@ static bool emit_const_hw_load(u32 addr, u32 r2, u32 opcode, bool *C_func_called
 
 				case 0x1c00 ... 0x1dff: // SPU reg
 					// Call w/ params:
-					//  SPU_readRegister(addr);
-					// NOTE: called func only cares about lower 16 bits of addr param
+					//  SPU_readRegister(addr, cycles);
+					// NOTE: called func only cares about lower 16 bits of
+					//  addr param. The cycles param is real: the SPU plugin
+					//  uses it for ADSR-envelope timing on voice-vol reads,
+					//  so it must be psxRegs.cycle, not leftover $a1.
+					LI16(MIPSREG_A0, lower);
 					JAL(SPU_readRegister);
-					LI16(MIPSREG_A0, lower);  // <BD>
+					LW(MIPSREG_A1, PERM_REG_1, off(cycle));  // <BD>
 					*C_func_called = true;
 					move_result_out_of_v0 = true;
 					break;
@@ -818,6 +835,19 @@ static bool emit_const_hw_load(u32 addr, u32 r2, u32 opcode, bool *C_func_called
 				case 0x1128:  // Timer 2 Counter Target Value (R/W)
 					JAL(psxRcntRtarget);
 					LI16(MIPSREG_A0, 2);  // <BD>
+					*C_func_called = true;
+					move_result_out_of_v0 = true;
+					break;
+
+				case 0x1c00 ... 0x1dff: // SPU reg
+					// Route through psxHwRead32: it combines the two 16-bit
+					//  SPU register reads (addr, addr+2) and passes
+					//  psxRegs.cycle to the SPU plugin internally. A raw
+					//  psxH[] load here would return stale data (SPU regs
+					//  are computed on read).
+					LUI(MIPSREG_A0, 0x1f80);
+					JAL(psxHwRead32);
+					ORI(MIPSREG_A0, MIPSREG_A0, lower);  // <BD>
 					*C_func_called = true;
 					move_result_out_of_v0 = true;
 					break;
