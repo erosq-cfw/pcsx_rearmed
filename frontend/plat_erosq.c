@@ -14,6 +14,8 @@
 #include <string.h>
 #include <stdint.h>
 #include <signal.h>
+#include <sys/time.h>
+#include <ucontext.h>
 #include <linux/input.h>
 
 #include "libpicofe/input.h"
@@ -142,6 +144,57 @@ static void get_layer_pos(int *x, int *y, int *w, int *h)
 	*x = 0; *y = 0; *w = PANEL_W; *h = PANEL_H;
 }
 
+/* ponytail: EROSQ_SAMPLE=1 -> SIGPROF PC sampler (1kHz). Buckets each sample as
+ * JIT (inside the mipsrec code cache = guest-code execution) vs native, and logs
+ * native host PCs for offline nm symbolization (binary is non-PIE so PC == link
+ * address). Answers "where does core time actually go" — GTE math / mem helpers /
+ * emitted block bodies — before investing in any core-body optimization.
+ * kill -USR2 dumps /media/sd/psx/samp.bin (serviced in the flip path, not signal ctx). */
+extern void mipsrec_code_range(uintptr_t *lo, uintptr_t *hi);
+static uintptr_t g_jit_lo, g_jit_hi;
+static volatile unsigned long g_smp_jit, g_smp_nat;
+#define SMP_MAX 262144
+static unsigned g_smp_pc[SMP_MAX];
+static volatile unsigned g_smp_n;
+static volatile sig_atomic_t g_want_smpdump;
+static void prof_sig(int sig, siginfo_t *si, void *ucv)
+{
+	(void)sig; (void)si;
+	uintptr_t pc = (uintptr_t)((ucontext_t *)ucv)->uc_mcontext.pc;
+	if (pc >= g_jit_lo && pc < g_jit_hi) {
+		g_smp_jit++;
+	} else {
+		unsigned n = g_smp_n;
+		g_smp_nat++;
+		if (n < SMP_MAX) { g_smp_pc[n] = (unsigned)pc; g_smp_n = n + 1; }
+	}
+}
+static void smpdump_handler(int sig) { (void)sig; g_want_smpdump = 1; }
+static void smp_dump(void)
+{
+	FILE *f = fopen("/media/sd/psx/samp.bin", "wb");
+	if (f) { fwrite(g_smp_pc, 4, g_smp_n, f); fclose(f); }
+	fprintf(stderr, "SAMPLE jit=%lu nat=%lu (%.1f%% jit) dumped=%u\n",
+		g_smp_jit, g_smp_nat,
+		100.0 * g_smp_jit / (g_smp_jit + g_smp_nat + 1), g_smp_n);
+}
+static void sampler_init(void)
+{
+	struct sigaction sa;
+	struct itimerval it;
+	if (!getenv("EROSQ_SAMPLE")) return;
+	mipsrec_code_range(&g_jit_lo, &g_jit_hi);
+	memset(&sa, 0, sizeof sa);
+	sa.sa_sigaction = prof_sig;
+	sa.sa_flags = SA_SIGINFO | SA_RESTART;
+	sigaction(SIGPROF, &sa, NULL);
+	signal(SIGUSR2, smpdump_handler);
+	it.it_interval.tv_sec = 0; it.it_interval.tv_usec = 1000; /* 1 kHz */
+	it.it_value = it.it_interval;
+	setitimer(ITIMER_PROF, &it, NULL);
+	fprintf(stderr, "SAMPLE: on, jit=[%p,%p)\n", (void *)g_jit_lo, (void *)g_jit_hi);
+}
+
 /* nearest-neighbour scale packed RGB565 src(sw x sh) -> panel, then present.
  * The naive form did an integer divide per output pixel (PANEL_W*PANEL_H =
  * 76800 divides/frame, ~30 cyc each on this MIPS core). Precompute the src
@@ -211,6 +264,7 @@ void plat_init(void)
 
 	signal(SIGUSR1, shot_handler);   /* ponytail: kill -USR1 -> shot.ppm */
 	g_prof_on = getenv("EROSQ_PROF") ? 1 : 0;
+	sampler_init();
 
 	in_evdev_init(&erosq_evdev_pdata);
 	in_probe();
@@ -242,6 +296,7 @@ void *plat_gvideo_flip(void)
 {
 	present_scaled(shadow_fb, psx_w, psx_h);
 	if (g_want_shot) { g_want_shot = 0; dump_ppm(shadow_fb, psx_w, psx_h); }
+	if (g_want_smpdump) { g_want_smpdump = 0; smp_dump(); }
 	/* EROSQ_VID_LOG=1: confirm the frame path is live without a human watching */
 	if (getenv("EROSQ_VID_LOG")) {
 		static unsigned long n;

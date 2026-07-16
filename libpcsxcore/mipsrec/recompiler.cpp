@@ -357,6 +357,15 @@ static inline bool IsFuzzyScratchpadAddr(const u32 reg)  { return iRegs[reg].is_
 static u8 recMemBase[RECMEM_SIZE] __attribute__((aligned(4)));
 
 u32        *recMem;                /* Where does next emitted opcode in block go? */
+
+/* ponytail: expose the code-cache range for the EROSQ_SAMPLE PC sampler
+ * (plat_erosq.c) so it can bucket samples as JIT (emitted block code) vs native. */
+extern "C" void mipsrec_code_range(uintptr_t *lo, uintptr_t *hi)
+{
+	*lo = (uintptr_t)recMemBase;
+	*hi = (uintptr_t)recMemBase + RECMEM_SIZE;
+}
+
 static u32 *recMemStart;           /* Where did first emitted opcode in block go? */
 static u32 pc;                     /* Recompiler pc */
 static u32 oldpc;                  /* Recompiler pc at start of block */
