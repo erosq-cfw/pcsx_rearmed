@@ -468,6 +468,11 @@ OBJS += frontend/libpicofe/linux/in_evdev.o    # evdev input
 OBJS += frontend/plat_erosq.o frontend/drm_out.o
 frontend/main.o frontend/plugin_lib.o frontend/menu.o: CFLAGS += -DEROSQ
 plugins/gpu_unai/gpulib_if.o: CFLAGS += -DGPU_UNAI_USE_MXU
+# X1000 is an in-order XBurst1; tune the compiled C (gpu_unai/gte/spu) for the
+# closest GCC pipeline model. Measured +2-4% on GPU-bound titles; scheduling
+# only, no ISA change, no effect on dynarec-emitted code. Redundant-but-harmless
+# once the buildroot toolchain default also carries --with-tune=24kc.
+CFLAGS += -mtune=24kc
 USE_PLUGIN_LIB = 1
 USE_FRONTEND = 1
 endif

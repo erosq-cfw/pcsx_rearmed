@@ -29,7 +29,7 @@
 
 /* ponytail: coarse frame-phase profiler, defined in plat_erosq.c */
 extern int g_prof_on;
-extern unsigned long long g_prof_gpu_ns, g_prof_present_ns;
+extern unsigned long long g_prof_gpu_ns, g_prof_present_ns, g_prof_spu_ns;
 #include "plat.h"
 #include "pcnt.h"
 #include "pl_gun_ts.h"
@@ -831,10 +831,11 @@ void pl_frame_limit(void)
 		if (g_prof_on && diff > 0) { /* coarse frame-phase split over this 1s window */
 			double win = (double)diff * 1000.0; /* us->ns */
 			double gpu = (double)g_prof_gpu_ns, pres = (double)g_prof_present_ns;
-			fprintf(stderr, "PROF vsps=%.1f gpu=%.0f%% present=%.0f%% core=%.0f%% (gpu=%.1fms/s present=%.1fms/s)\n",
-				pl_rearmed_cbs.vsps_cur, gpu/win*100, pres/win*100,
-				(win-gpu-pres)/win*100, gpu/1e6, pres/1e6);
-			g_prof_gpu_ns = g_prof_present_ns = 0;
+			double spu = (double)g_prof_spu_ns;
+			fprintf(stderr, "PROF vsps=%.1f gpu=%.0f%% present=%.0f%% spu=%.0f%% core=%.0f%% (gpu=%.1fms/s present=%.1fms/s spu=%.1fms/s)\n",
+				pl_rearmed_cbs.vsps_cur, gpu/win*100, pres/win*100, spu/win*100,
+				(win-gpu-pres-spu)/win*100, gpu/1e6, pres/1e6, spu/1e6);
+			g_prof_gpu_ns = g_prof_present_ns = g_prof_spu_ns = 0;
 		}
 		pl_rearmed_cbs.flip_cnt = 0;
 		if (g_opts & OPT_SHOWCPU)

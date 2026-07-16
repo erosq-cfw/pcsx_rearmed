@@ -170,8 +170,10 @@ static inline uint_fast16_t mxu_fetch_texel(u32 l_u, u32 l_v, u32 mask_v00u,
 }
 
 /* CF 0x021/0x041/0x061 (GOURAUD=0) and 0x0a1/0x0c1/0x0e1 (GOURAUD=1):
- * lit textured, no blend/mask/dither */
-template<int TM, bool GOU>
+ * lit textured, no blend/maskcheck/dither. MSET=CF_MASKSET (bit8): force the
+ * PS1 mask bit (0x8000) set on every written pixel, exactly as the scalar path
+ * does (uSrc | 0x8000) — cheap OR, unlocks the 0x1a1/0x121/0x141 buckets. */
+template<int TM, bool GOU, bool MSET>
 static void poly_mxu_tx_lit(const gpu_unai_t &gpu_unai, le16_t *pDst, u32 count)
 {
 	const gpu_unai_inner_t &inn = gpu_unai.inn;
@@ -206,6 +208,7 @@ static void poly_mxu_tx_lit(const gpu_unai_t &gpu_unai, le16_t *pDst, u32 count)
 		}
 		if (t0 | t1) {
 			u32 res = mxu_light_pair(((u32)t1 << 16) | t0);
+			if (MSET) res |= 0x80008000;
 			if (t0) pDst[0] = u16_to_le16((u16)res);
 			if (t1) pDst[1] = u16_to_le16((u16)(res >> 16));
 		}
@@ -230,7 +233,7 @@ static void poly_mxu_tx_lit(const gpu_unai_t &gpu_unai, le16_t *pDst, u32 count)
 				(gpu_unai.LightLUT[((t & 0x7c00) >> 5) | lb] << 10) |
 				(gpu_unai.LightLUT[ (t & 0x03e0)       | lg] << 5) |
 				(gpu_unai.LightLUT[((t & 0x001f) << 5) | lr]) |
-				(t & 0x8000));
+				(MSET ? 0x8000 : (t & 0x8000)));
 		}
 	}
 }
@@ -256,12 +259,20 @@ static void PolySpanMaybeMXU(const gpu_unai_t &gpu_unai, le16_t *pDst, u32 count
 		switch (CF) {
 		case 0x000: MXU_TAKE(poly_mxu_flat_fill(gpu_unai, pDst, count));
 		case 0x081: MXU_TAKE(poly_mxu_utx_gouraud(gpu_unai, pDst, count));
-		case 0x021: MXU_TAKE((poly_mxu_tx_lit<1, false>(gpu_unai, pDst, count)));
-		case 0x041: MXU_TAKE((poly_mxu_tx_lit<2, false>(gpu_unai, pDst, count)));
-		case 0x061: MXU_TAKE((poly_mxu_tx_lit<3, false>(gpu_unai, pDst, count)));
-		case 0x0a1: MXU_TAKE((poly_mxu_tx_lit<1, true>(gpu_unai, pDst, count)));
-		case 0x0c1: MXU_TAKE((poly_mxu_tx_lit<2, true>(gpu_unai, pDst, count)));
-		case 0x0e1: MXU_TAKE((poly_mxu_tx_lit<3, true>(gpu_unai, pDst, count)));
+		case 0x021: MXU_TAKE((poly_mxu_tx_lit<1, false, false>(gpu_unai, pDst, count)));
+		case 0x041: MXU_TAKE((poly_mxu_tx_lit<2, false, false>(gpu_unai, pDst, count)));
+		case 0x061: MXU_TAKE((poly_mxu_tx_lit<3, false, false>(gpu_unai, pDst, count)));
+		case 0x0a1: MXU_TAKE((poly_mxu_tx_lit<1, true,  false>(gpu_unai, pDst, count)));
+		case 0x0c1: MXU_TAKE((poly_mxu_tx_lit<2, true,  false>(gpu_unai, pDst, count)));
+		case 0x0e1: MXU_TAKE((poly_mxu_tx_lit<3, true,  false>(gpu_unai, pDst, count)));
+		/* MASKSET (bit8) variants of the above — same kernels, force 0x8000.
+		 * 0x1a1/0x121/0x141 dominate mask-heavy engines (MGS ~38% of pixels). */
+		case 0x121: MXU_TAKE((poly_mxu_tx_lit<1, false, true>(gpu_unai, pDst, count)));
+		case 0x141: MXU_TAKE((poly_mxu_tx_lit<2, false, true>(gpu_unai, pDst, count)));
+		case 0x161: MXU_TAKE((poly_mxu_tx_lit<3, false, true>(gpu_unai, pDst, count)));
+		case 0x1a1: MXU_TAKE((poly_mxu_tx_lit<1, true,  true>(gpu_unai, pDst, count)));
+		case 0x1c1: MXU_TAKE((poly_mxu_tx_lit<2, true,  true>(gpu_unai, pDst, count)));
+		case 0x1e1: MXU_TAKE((poly_mxu_tx_lit<3, true,  true>(gpu_unai, pDst, count)));
 		}
 #undef MXU_TAKE
 	}

@@ -34,7 +34,7 @@
  * the per-second split. ns via CLOCK_MONOTONIC. Stripped after the perf hunt. */
 #include <time.h>
 int g_prof_on;
-unsigned long long g_prof_gpu_ns, g_prof_present_ns;
+unsigned long long g_prof_gpu_ns, g_prof_present_ns, g_prof_spu_ns;
 unsigned long long prof_now_ns(void)
 {
 	struct timespec t;

@@ -1179,9 +1179,17 @@ void schedule_next_irq(void)
 
 // rearmed: called dynamically now
 
+/* ponytail: coarse SPU-mix profiler, gated by EROSQ_PROF (g_prof_on). Isolates
+ * SPU mix+reverb cost that was previously lumped into the PROF "core%" bucket. */
+extern int g_prof_on;
+extern unsigned long long g_prof_spu_ns;
+unsigned long long prof_now_ns(void);
+
 void CALLBACK SPUasync(unsigned int cycle, unsigned int flags)
 {
+ unsigned long long _t0 = g_prof_on ? prof_now_ns() : 0;
  do_samples(cycle, 0);
+ if (g_prof_on) g_prof_spu_ns += prof_now_ns() - _t0;
 
  if (spu.spuCtrl & CTRL_IRQ)
   schedule_next_irq();
