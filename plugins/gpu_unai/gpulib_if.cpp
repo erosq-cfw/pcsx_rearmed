@@ -28,6 +28,13 @@
 #include "../gpulib/gpu.h"
 #include "old/if.h"
 
+/* ponytail: coarse frame-phase profiler, defined in frontend/plat_erosq.c */
+extern "C" {
+	extern int g_prof_on;
+	extern unsigned long long g_prof_gpu_ns;
+	unsigned long long prof_now_ns(void);
+}
+
 //#include "port.h"
 #include "gpu_unai.h"
 
@@ -270,6 +277,8 @@ int renderer_do_cmd_list(u32 *list_, int list_len, uint32_t *ex_regs,
     return oldunai_do_cmd_list(list_, list_len, ex_regs,
              cycles_sum_out, cycles_last, last_cmd);
   }
+
+  unsigned long long _pt0 = g_prof_on ? prof_now_ns() : 0;
 
   for (; list < list_end; list += 1 + len)
   {
@@ -700,6 +709,7 @@ breakloop:
   *cycles_sum_out += cpu_cycles_sum;
   *cycles_last = cpu_cycles;
   *last_cmd = cmd;
+  if (g_prof_on) g_prof_gpu_ns += prof_now_ns() - _pt0;
   return list - list_start;
 }
 

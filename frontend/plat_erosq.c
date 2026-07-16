@@ -29,6 +29,19 @@
 #define PANEL_W DRM_OUT_W
 #define PANEL_H DRM_OUT_H
 
+/* ponytail: coarse frame-phase profiler (EROSQ_PROF=1). Accumulators are summed
+ * by the GPU plugin (renderer_do_cmd_list) and here (present); plugin_lib prints
+ * the per-second split. ns via CLOCK_MONOTONIC. Stripped after the perf hunt. */
+#include <time.h>
+int g_prof_on;
+unsigned long long g_prof_gpu_ns, g_prof_present_ns;
+unsigned long long prof_now_ns(void)
+{
+	struct timespec t;
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	return (unsigned long long)t.tv_sec * 1000000000ull + t.tv_nsec;
+}
+
 /* Normally defined by frontend/pcsxr-threads.c (built only with USE_RTHREADS).
  * We build single-threaded (single-core X1000, 32MB RAM), so define it here as
  * 1 core -> the "SPU multithreading" menu option stays disabled. */
@@ -129,22 +142,48 @@ static void get_layer_pos(int *x, int *y, int *w, int *h)
 	*x = 0; *y = 0; *w = PANEL_W; *h = PANEL_H;
 }
 
-/* nearest-neighbour scale packed RGB565 src(sw x sh) -> panel, then present */
+/* nearest-neighbour scale packed RGB565 src(sw x sh) -> panel, then present.
+ * The naive form did an integer divide per output pixel (PANEL_W*PANEL_H =
+ * 76800 divides/frame, ~30 cyc each on this MIPS core). Precompute the src
+ * column/row index tables instead — rebuilt only when the source resolution
+ * changes (rare: at mode set), so the inner loop is a pure gather. */
+static int16_t xmap[PANEL_W], ymap[PANEL_H];
+static int xmap_sw, ymap_sh;
 static void present_scaled(const uint16_t *src, int sw, int sh)
 {
 	int x, y;
+	unsigned long long _t0 = g_prof_on ? prof_now_ns() : 0;
 	if (sw == PANEL_W && sh == PANEL_H) {
-		for (y = 0; y < PANEL_H; y++)
-			memcpy(drm_buf + (size_t)y * drm_stride, src + (size_t)y * sw, PANEL_W * 2);
-	} else {
+		/* 1:1 copy. musl memcpy is tuned for cached memory and runs ~3x slower
+		 * than explicit word stores against the uncached scanout; copy 32 bits
+		 * (two pixels) at a time instead. */
 		for (y = 0; y < PANEL_H; y++) {
-			const uint16_t *s = src + (size_t)(y * sh / PANEL_H) * sw;
-			uint16_t *d = drm_buf + (size_t)y * drm_stride;
-			for (x = 0; x < PANEL_W; x++)
-				d[x] = s[x * sw / PANEL_W];
+			const uint32_t *s32 = (const uint32_t *)(src + (size_t)y * sw);
+			uint32_t *d32 = (uint32_t *)(drm_buf + (size_t)y * drm_stride);
+			for (x = 0; x < PANEL_W / 2; x++)
+				d32[x] = s32[x];
+		}
+	} else {
+		if (sw != xmap_sw) {
+			for (x = 0; x < PANEL_W; x++) xmap[x] = (int16_t)(x * sw / PANEL_W);
+			xmap_sw = sw;
+		}
+		if (sh != ymap_sh) {
+			for (y = 0; y < PANEL_H; y++) ymap[y] = (int16_t)(y * sh / PANEL_H);
+			ymap_sh = sh;
+		}
+		/* drm_buf is an uncached dumb-buffer scanout: 16-bit stores cost a
+		 * full bus cycle each. Pack two output pixels into one 32-bit store
+		 * to halve write transactions (PANEL_W is even). */
+		for (y = 0; y < PANEL_H; y++) {
+			const uint16_t *s = src + (size_t)ymap[y] * sw;
+			uint32_t *d32 = (uint32_t *)(drm_buf + (size_t)y * drm_stride);
+			for (x = 0; x < PANEL_W; x += 2)
+				d32[x >> 1] = (uint32_t)s[xmap[x]] | ((uint32_t)s[xmap[x + 1]] << 16);
 		}
 	}
 	drm_present();
+	if (g_prof_on) g_prof_present_ns += prof_now_ns() - _t0;
 }
 
 void plat_init(void)
@@ -171,6 +210,7 @@ void plat_init(void)
 	drm_buf = drm_pixels(&drm_stride);
 
 	signal(SIGUSR1, shot_handler);   /* ponytail: kill -USR1 -> shot.ppm */
+	g_prof_on = getenv("EROSQ_PROF") ? 1 : 0;
 
 	in_evdev_init(&erosq_evdev_pdata);
 	in_probe();

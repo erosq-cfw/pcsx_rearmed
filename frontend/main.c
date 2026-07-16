@@ -734,6 +734,13 @@ int main(int argc, char *argv[])
 		pl_rearmed_cbs.frameskip = -1;
 		fprintf(stderr, "perf: frame limiter OFF, frameskip AUTO (-nolimit)\n");
 	}
+	if (getenv("EROSQ_PROF")) {
+		/* uncapped + render EVERY frame so the profiler's present/gpu split
+		 * isn't undercounted by dropped frames */
+		g_opts |= OPT_NO_FRAMELIM;
+		pl_rearmed_cbs.frameskip = 0;
+		fprintf(stderr, "perf: PROF mode (limiter off, frameskip off)\n");
+	}
 
 #ifndef LIGHTREC_DEBUG
 	pl_start_watchdog();

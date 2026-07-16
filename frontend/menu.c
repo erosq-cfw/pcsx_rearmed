@@ -362,6 +362,13 @@ static void menu_set_defconfig(void)
 #else
 	frameskip = 1; // 1 - off
 #endif
+#ifdef EROSQ
+	/* Render only the visible field of interlaced/hi-res modes (480i -> 240).
+	 * The 320x240 panel discards the other field anyway, so this halves GPU
+	 * fill on hi-res games (e.g. GT2 42->58 vsps) with no visible change and
+	 * no effect on progressive games. */
+	pl_rearmed_cbs.scale_hires = 1;
+#endif
 	analog_deadzone = 50;
 	soft_scaling = 1;
 	soft_filter = 0;
