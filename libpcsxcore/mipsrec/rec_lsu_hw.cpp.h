@@ -41,7 +41,6 @@
  */
 static bool emit_const_hw_store(u32 addr, u32 r2, u32 opcode, bool *C_func_called)
 {
-	u32 rs = _fRs_(opcode);
 	bool direct = false;
 	bool indirect = false;
 	u32 upper = (addr & 0x1fffffff) >> 16;  /* fold KSEG0/KSEG1 mirror (0x9f80/0xbf80) -> physical 0x1f80 so const HW accesses take the per-port handlers (side effects: DMA/IRQ/SPU/CDROM), not a bare psxH store. Matches the psxhw.cpp KSEG1 normalization; PS1 code reaches HW uncached via KSEG1. */
@@ -126,6 +125,20 @@ static bool emit_const_hw_store(u32 addr, u32 r2, u32 opcode, bool *C_func_calle
 					direct = true;
 					break;
 
+				case 0x1c00 ... 0x1fff: // SPU reg, 8-bit
+					//  EROSQ: match rearmed psxHwWrite8 — even addr goes to
+					// SPU_writeRegister(addr, byte, cycle), odd is ignored;
+					// no psxH[] write either way (a raw byte store would
+					// leave stale data the SPU never sees).
+					if (!(lower & 1)) {
+						LI16(MIPSREG_A0, lower);
+						ANDI(MIPSREG_A1, r2, 0xff);
+						JAL(SPU_writeRegister);
+						LW(MIPSREG_A2, PERM_REG_1, off(cycle));  // <BD>
+						*C_func_called = true;
+					}
+					break;
+
 				default:
 					direct = true;
 					break;
@@ -168,6 +181,24 @@ static bool emit_const_hw_store(u32 addr, u32 r2, u32 opcode, bool *C_func_calle
 
 				case 0x1070:  // IREG
 				case 0x1074:  // IMASK
+				//  EROSQ audit 2026-07-16: rearmed psxHwWrite16 gives all of
+				// these "forced write32" semantics — DMA CHCR (+4 mirrors)
+				// can start/abort a transfer, PCR can kick a pending DMA,
+				// ICR has IRQ-ack &= semantics, and the MADR/BCR/RAM_SIZE
+				// group is stored zero-extended to 32 bits (clearing the
+				// upper halfword). A raw 16-bit direct store loses all of
+				// that, so route them through psxHwWrite16.
+				case 0x1014: case 0x1060:  // forced w32, zero-extend
+				case 0x1080: case 0x1090: case 0x10a0:  // DMA MADR
+				case 0x10b0: case 0x10c0: case 0x10d0: case 0x10e0:
+				case 0x1088: case 0x108c:  // DMA0 CHCR (MDEC in) + mirror
+				case 0x1098: case 0x109c:  // DMA1 CHCR (MDEC out) + mirror
+				case 0x10a8: case 0x10ac:  // DMA2 CHCR (GPU) + mirror
+				case 0x10b8: case 0x10bc:  // DMA3 CHCR (CDROM) + mirror
+				case 0x10c8: case 0x10cc:  // DMA4 CHCR (SPU) + mirror
+				case 0x10e8: case 0x10ec:  // DMA6 CHCR (OT clear) + mirror
+				case 0x10f0:               // DMA PCR
+				case 0x10f4:               // DMA ICR
 					indirect = true;
 					break;
 
@@ -263,13 +294,18 @@ static bool emit_const_hw_store(u32 addr, u32 r2, u32 opcode, bool *C_func_calle
 
 				case 0x1070:  // IREG
 				case 0x1074:  // IMASK
-				case 0x1088:  // DMA0 CHCR (MDEC in)
-				case 0x1098:  // DMA1 CHCR (MDEC out)
-				case 0x10a8:  // DMA2 CHCR (GPU)
-				case 0x10b8:  // DMA3 CHCR (CDROM)
-				case 0x10c8:  // DMA4 CHCR (SPU)
+				//  EROSQ audit 2026-07-16: rearmed psxHwWrite32 also routes
+				// the +4 CHCR mirrors and DMA PCR (0x10f0, can start a
+				// pending DMA on enable-bit rise) through handlers; the
+				// vendored pcsx4all table predates them.
+				case 0x1088: case 0x108c:  // DMA0 CHCR (MDEC in) + mirror
+				case 0x1098: case 0x109c:  // DMA1 CHCR (MDEC out) + mirror
+				case 0x10a8: case 0x10ac:  // DMA2 CHCR (GPU) + mirror
+				case 0x10b8: case 0x10bc:  // DMA3 CHCR (CDROM) + mirror
+				case 0x10c8: case 0x10cc:  // DMA4 CHCR (SPU) + mirror
 					              // NOTE: DMA5 Parallel I/O not implemented in emu
-				case 0x10e8:  // DMA6 CHCR (GPU OT CLEAR)
+				case 0x10e8: case 0x10ec:  // DMA6 CHCR (GPU OT CLEAR) + mirror
+				case 0x10f0:  // DMA PCR
 				case 0x10f4:  // DMA ICR
 					indirect = true;
 					break;
@@ -396,8 +432,13 @@ static bool emit_const_hw_store(u32 addr, u32 r2, u32 opcode, bool *C_func_calle
 
 	if (indirect)
 	{
-		s16 imm = _fImm_(opcode);
-		u32 r1 = regMipsToHost(rs, REG_LOAD, REG_REGISTER);
+		//  EROSQ: address is known-const at recompile time — build $a0 with
+		// LUI/ORI instead of ADDIU off the cached guest base reg, mirroring
+		// the const-$a0 fix in emit_const_hw_load() (stores can't self-
+		// clobber rs, but the const form is register-state-independent and
+		// drops the base-reg materialization entirely).
+		#define EMIT_CONST_A0_HI()  LUI(MIPSREG_A0, ((addr) >> 16) & 0xffff)
+		#define EMIT_CONST_A0_LO()  ORI(MIPSREG_A0, MIPSREG_A0, (addr) & 0xffff)
 		switch (width) {
 			case 0:
 			{
@@ -405,7 +446,8 @@ static bool emit_const_hw_store(u32 addr, u32 r2, u32 opcode, bool *C_func_calle
 				//  Probably never encountered. We'll try to support it anyway..
 
 				u32 insn = opcode & 0xfc000000;
-				ADDIU(MIPSREG_A0, r1, imm);
+				EMIT_CONST_A0_HI();
+				EMIT_CONST_A0_LO();
 #ifdef HAVE_MIPS32R2_EXT_INS
 				JAL(psxHwRead32);               // result in MIPSREG_V0
 				INS(MIPSREG_A0, 0, 0, 2);       // <BD> clear 2 lower bits of $a0
@@ -415,7 +457,8 @@ static bool emit_const_hw_store(u32 addr, u32 r2, u32 opcode, bool *C_func_calle
 				SLL(MIPSREG_A0, MIPSREG_A0, 2); // <BD> clear lower 2 bits of $a0
 #endif
 
-				ADDIU(MIPSREG_A0, r1, imm);
+				EMIT_CONST_A0_HI();
+				EMIT_CONST_A0_LO();
 
 				if (insn == 0xa8000000)   // SWL
 					LUI(TEMP_2, ADR_HI(SWL_MASKSHIFT));
@@ -459,22 +502,26 @@ static bool emit_const_hw_store(u32 addr, u32 r2, u32 opcode, bool *C_func_calle
 				break;
 			}
 			case 8:
-				ADDIU(MIPSREG_A0, r1, imm);
+				EMIT_CONST_A0_HI();
+				ANDI(MIPSREG_A1, r2, 0xff);
 				JAL(psxHwWrite8);
-				ANDI(MIPSREG_A1, r2, 0xff);  // <BD>
+				EMIT_CONST_A0_LO();  // <BD> ($a0 fully valid before callee)
 				break;
 			case 16:
-				ADDIU(MIPSREG_A0, r1, imm);
+				EMIT_CONST_A0_HI();
+				ANDI(MIPSREG_A1, r2, 0xffff);
 				JAL(psxHwWrite16);
-				ANDI(MIPSREG_A1, r2, 0xffff);  // <BD>
+				EMIT_CONST_A0_LO();  // <BD>
 				break;
 			case 32:
-				ADDIU(MIPSREG_A0, r1, imm);
+				EMIT_CONST_A0_HI();
+				MOV(MIPSREG_A1, r2);
 				JAL(psxHwWrite32);
-				MOV(MIPSREG_A1, r2);  // <BD>
+				EMIT_CONST_A0_LO();  // <BD>
 				break;
 		}
-		regUnlock(r1);
+		#undef EMIT_CONST_A0_HI
+		#undef EMIT_CONST_A0_LO
 		*C_func_called = true;
 	}
 
@@ -644,6 +691,16 @@ static bool emit_const_hw_load(u32 addr, u32 r2, u32 opcode, bool *C_func_called
 					move_result_out_of_v0 = true;
 					break;
 
+				case 0x1054:  // SIO1_STAT
+					//  EROSQ audit 2026-07-16: rearmed psxHwRead16 returns
+					// constant 0xa0 here (Armored Core / F1 link-cable
+					// misdetection fix); a raw psxH load would return 0.
+					JAL(sio1ReadStat16);
+					NOP();  // <BD>
+					*C_func_called = true;
+					move_result_out_of_v0 = true;
+					break;
+
 				case 0x1100:  // Timer 0 Current Counter Value (R/W)
 					JAL(psxRcntRcount);
 					LI16(MIPSREG_A0, 0);  // <BD>
@@ -746,6 +803,16 @@ static bool emit_const_hw_load(u32 addr, u32 r2, u32 opcode, bool *C_func_called
 			{
 				case 0x1040:  // JOY_DATA
 					JAL(sioRead32);
+					NOP();  // <BD>
+					*C_func_called = true;
+					move_result_out_of_v0 = true;
+					break;
+
+				case 0x1044:  // JOY_STAT
+					//  EROSQ audit 2026-07-16: rearmed psxHwRead32 returns
+					// sioReadStat16() (live StatReg, never mirrored into
+					// psxH) — a raw psxH load would show TX_RDY never set.
+					JAL(sioReadStat16);
 					NOP();  // <BD>
 					*C_func_called = true;
 					move_result_out_of_v0 = true;

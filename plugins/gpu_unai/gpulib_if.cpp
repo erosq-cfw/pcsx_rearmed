@@ -77,6 +77,16 @@ static void gpu_hist_dump(int sig)
     if (gpu_hist_span[i])
       fprintf(stderr, "  CF 0x%03x: %llu / %llu\n",
               i, gpu_hist_span[i], gpu_hist_px[i]);
+  fprintf(stderr, "[gpu] sprite CF histogram (prims/pixels, 100%% scalar):\n");
+  for (int i = 0; i < 1024; i++)
+    if (gpu_hist_sprite_prim[i])
+      fprintf(stderr, "  SPR 0x%03x: %llu / %llu\n",
+              i, gpu_hist_sprite_prim[i], gpu_hist_sprite_px[i]);
+  fprintf(stderr, "[gpu] tile CF histogram (prims/pixels):\n");
+  for (int i = 0; i < 1024; i++)
+    if (gpu_hist_tile_prim[i])
+      fprintf(stderr, "  TILE 0x%03x: %llu / %llu\n",
+              i, gpu_hist_tile_prim[i], gpu_hist_tile_px[i]);
 }
 
 static void mxu_spans_init(void)

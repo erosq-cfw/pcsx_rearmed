@@ -70,6 +70,10 @@ u16  sioRead16(void);
 u32  sioRead32(void);
 void sioWrite16(u16 value);
 void sioWrite32(u32 value);
+/* non-static in rearmed psxhw.c but declared nowhere; rec_lsu_hw.cpp.h
+ * emits it for const 16-bit reads of SIO1_STAT (0x1054) to match
+ * psxHwRead16's Armored Core / F1 link-cable misdetection fix. */
+u32  sio1ReadStat16(void);
 
 /* Seam 1d — interpreter's CP0 Move-To-Coprocessor helper. recMTC0()
  * (rec_cp0.cpp.h) routes every mtc0 through this so a write to the Status

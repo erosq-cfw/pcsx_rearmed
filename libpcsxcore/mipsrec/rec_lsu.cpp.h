@@ -38,18 +38,17 @@
 
 // Inline access to known-const HW,Scratchpad addresses (see rec_lsu_hw.cpp.h)
 //
-// EROSQ/rearmed Task 2.1: undefined for the MIPSREC backend (see matching
-// note by USE_DIRECT_MEM_ACCESS in recompiler.cpp) to keep this phase on the
-// call-out-only "indirect" path. This only removes ONE of the two routes
-// into rec_lsu_hw.cpp.h's const_hw_loads_stores() (the const-address
-// fast-path check at rec_lsu.cpp.h ~1410); emitOptimizedStaticLoad()'s own
-// call to it (~1544) is NOT guarded by this macro and stays reachable
-// either way — so every psxHwRead/Write*, sioRead/Write*, cdrRead/Write*,
-// mdecRead/Write*, psxRcntR*/W*, GPU_*Data, SPU_*Register call-out in that
-// file must resolve regardless of this #define (see compat.h Seam 1b).
-#ifndef MIPSREC
+// EROSQ/rearmed: originally undefined for the MIPSREC bring-up phase.
+// Enabled 2026-07-16 after a full semantic audit of rec_lsu_hw.cpp.h's
+// per-port emitters against rearmed's psxhw.c: the store table needed the
+// DMA CHCR mirrors / PCR / forced-write32 ports routed indirect (done, see
+// EROSQ notes in that file); everything else was already exact or a
+// documented-benign divergence. The load half was already live either way
+// via emitOptimizedStaticLoad()'s unguarded call to const_hw_loads_stores().
+// ⚠️ Enabling this must NOT enable USE_HW_FUNCS_FOR_INDIRECT_ACCESS below —
+// rearmed's psxHw* do not handle ROM or the cache-control port (see the
+// !MIPSREC guard there).
 #define USE_DIRECT_HW_ACCESS
-#endif
 
 // Assume that stores using $k0,$k1,$gp,$sp as base registers aren't used
 //  to modify code. Code invalidation sequence will not be emitted.
@@ -82,7 +81,14 @@
 //  would only just end up calling those funcs every time.
 //  NOTE: Only when the optimizations listed below are enabled are we sure
 //        that all indirect accesses must be going to HW I/O, ROM, or cache port.
-#if defined(USE_DIRECT_MEM_ACCESS) && defined(USE_DIRECT_HW_ACCESS) && defined(SKIP_SAME_2MB_REGION_CHECK) && defined(SKIP_WRITEOK_CHECK)
+//  EROSQ: never under MIPSREC. The comment above describes pcsx4all's
+// psxhw.cpp, which added ROM-read and cache-control-port handling to its
+// psxHwRead*/Write*. rearmed's psxhw.c has neither: every function switches
+// on (add & 0xffff) and defaults to a raw psxH access, so routing indirect
+// accesses to psxHw* would turn a BIOS ROM load (0xbfc0xxxx) into psxH
+// garbage and a cache-control write (0xfffe0130) into scratchpad corruption.
+// Indirect stays on the psxMem* LUT adapters, which handle both.
+#if defined(USE_DIRECT_MEM_ACCESS) && defined(USE_DIRECT_HW_ACCESS) && defined(SKIP_SAME_2MB_REGION_CHECK) && defined(SKIP_WRITEOK_CHECK) && !defined(MIPSREC)
 	#define USE_HW_FUNCS_FOR_INDIRECT_ACCESS
 #endif
 
@@ -1419,13 +1425,27 @@ static void emitLoadStoreSeries()
 		if ((addr_max & 0x0fffffff) >= 0x800000)
 		{
 			bool is_hw_address = false;
-#ifdef USE_DIRECT_HW_ACCESS
 			{
 				const u16 upper = addr_max >> 16;
-				if (upper == 0x1f80 || upper == 0x9f80 || upper == 0xbf80)
+				if (upper == 0x1f80 || upper == 0x9f80 || upper == 0xbf80) {
+#ifdef USE_DIRECT_HW_ACCESS
 					is_hw_address = true;
-			}
+#else
+					// EROSQ: debug fallback — if USE_DIRECT_HW_ACCESS is
+					//  ever disabled again, keep const-scratchpad series
+					//  direct: the 1KB scratchpad has no side effects and
+					//  const_hw_loads_stores() emits plain psxH[] accesses
+					//  for it. Otherwise a known-const scratchpad access
+					//  takes the 3-layer call-out (JAL mipsrec_*->psxMem*->
+					//  LUT->psxH) while an UNKNOWN-base one inlines direct.
+					const u32 addr_min = base_reg_constval + imm_min;
+					if ((addr_min >> 16) == upper &&
+					    (addr_min & 0xffff) < 0x400 &&
+					    (addr_max & 0xffff) < 0x400)
+						is_hw_address = true;
 #endif
+				}
+			}
 
 			if (is_hw_address) {
 				/**************************************

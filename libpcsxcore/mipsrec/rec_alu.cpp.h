@@ -43,6 +43,20 @@ static void recADDIU()
 
 	const bool set_const = IsConst(_Rs_);
 
+	//  EROSQ: propagate fuzzy address classification through ADDIU, like
+	// recADDU() does. An `addiu ptr, fuzzybase, imm` (pointer bump, struct
+	// field) otherwise drops the class and the next load/store emits the
+	// full dual direct+indirect sequence instead of a direct access.
+	//  RAM/non-RAM propagate for any imm: the +/-32KB bound is strictly
+	// tighter than the unbounded unknown offset recADDU() already accepts
+	// (non-RAM's worst case is just the always-correct indirect path).
+	//  Scratchpad keeps recADDU()'s strictness (1KB region adjacent to I/O
+	// ports): only propagate when imm can't escape the region.
+	const bool fuzzy_ram_addr        = !set_const && IsFuzzyRamAddr(_Rs_);
+	const bool fuzzy_nonram_addr     = !set_const && IsFuzzyNonramAddr(_Rs_);
+	const bool fuzzy_scratchpad_addr = !set_const && IsFuzzyScratchpadAddr(_Rs_) &&
+	                                   ((s32)_Imm_ >= 0 && (s32)_Imm_ < 0x400);
+
 	/* Catch ADDIU reg, $0, imm */
 	/* Exit if const already loaded */
 	if (!_Rs_ && IsConst(_Rt_) && GetConst(_Rt_) == (s32)_Imm_)
@@ -52,6 +66,15 @@ static void recADDIU()
 
 	if (set_const)
 		SetConst(_Rt_, GetConst(_Rs_) + (s32)_Imm_);
+
+	if (_Rt_) {
+		if (fuzzy_ram_addr)
+			SetFuzzyRamAddr(_Rt_);
+		if (fuzzy_nonram_addr)
+			SetFuzzyNonramAddr(_Rt_);
+		if (fuzzy_scratchpad_addr)
+			SetFuzzyScratchpadAddr(_Rt_);
+	}
 }
 static void recADDI() { recADDIU(); }
 

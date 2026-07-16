@@ -25,10 +25,18 @@
 #define __GPU_UNAI_GPU_INNER_MXU_H__
 
 #include "mxu_x1000.h"
+#include "gpu_blend_swar.h"
 
 static int mxu_spans_on = 1;      /* EROSQ_MXU=0 disables at runtime (A/B) */
 static int gpu_hist_on = 0;       /* EROSQ_GPU_HIST=1 + SIGUSR1 dumps */
 static unsigned long long gpu_hist_span[1024], gpu_hist_px[1024];
+/* sprites/tiles were invisible to the poly-span histogram (their pixels are
+ * 100% scalar C on MIPS, and prim_try_simplify_quad_t silently converts
+ * axis-aligned textured quads into the sprite path) — count them too.
+ * Indexed by the sprite/tile CF space; px is width*lines (ignores the rare
+ * interlace line skip, fine for share measurement). */
+static unsigned long long gpu_hist_sprite_prim[1024], gpu_hist_sprite_px[1024];
+static unsigned long long gpu_hist_tile_prim[1024], gpu_hist_tile_px[1024];
 
 /* Shared 2-pixel lighting core. Texel pair in xr10, 5-bit light lanes in
  * xr7/8/9 (r/g/b), xr14 = 0x001f001f, xr15 = 0x80008000.
@@ -78,11 +86,64 @@ static inline void mxu_gouraud_step_pair(void)
 	MXU_Q16ADD(MXU_XR3, MXU_XR3, MXU_XR6, MXU_XR0, MXU_WW, MXU_AA);
 }
 
-/* CF 0x000: untextured flat fill, no blend/mask — 24% of Crash's pixels.
- * Word stores via MXU (avoids u16*->u32* strict-aliasing UB). */
+/* Blend a packed 2-pixel pair per gpuBlendingGeneric<BM, false> semantics.
+ * Modes 0/1/3 are cross-lane-safe in plain GPR SWAR (gpu_blend_swar.h,
+ * host-tested bit-exact). Mode 2 computes dst - src + 0x8420 (17 bits per
+ * lane) so it needs the MXU's true per-lane mod-2^16 lanes; the mod-2^16
+ * wrap is exact because every consumer of 'diff' masks to bits <= 15.
+ * Clobbers XR10..XR13 only (light lanes XR7-9 / consts XR14-15 / gouraud
+ * accumulators XR1-6 survive). */
+static inline u32 mxu_blend_pair_sub(u32 uSrc, u32 uDst)
+{
+	MXU_S32I2M(MXU_XR10, uSrc & 0x7fff7fff);
+	MXU_S32I2M(MXU_XR11, uDst & 0x7fff7fff);
+	MXU_S32I2M(MXU_XR12, 0x84208420);
+	/* diff = dst - src + 0x8420, per lane */
+	MXU_Q16ADD(MXU_XR13, MXU_XR11, MXU_XR10, MXU_XR0, MXU_WW, MXU_SS);
+	MXU_Q16ADD(MXU_XR13, MXU_XR13, MXU_XR12, MXU_XR0, MXU_WW, MXU_AA);
+	/* low_bits = (dst ^ src) & 0x8420 */
+	MXU_S32XOR(MXU_XR10, MXU_XR10, MXU_XR11);
+	MXU_S32AND(MXU_XR10, MXU_XR10, MXU_XR12);
+	/* borrows = (diff - low_bits) & 0x8420 */
+	MXU_Q16ADD(MXU_XR10, MXU_XR13, MXU_XR10, MXU_XR0, MXU_WW, MXU_SS);
+	MXU_S32AND(MXU_XR10, MXU_XR10, MXU_XR12);
+	/* modulo = diff - borrows */
+	MXU_Q16ADD(MXU_XR13, MXU_XR13, MXU_XR10, MXU_XR0, MXU_WW, MXU_SS);
+	/* clamp = borrows - (borrows >> 5) */
+	MXU_Q16SLR(MXU_XR11, MXU_XR10, MXU_XR0, MXU_XR0, 5);
+	MXU_Q16ADD(MXU_XR10, MXU_XR10, MXU_XR11, MXU_XR0, MXU_WW, MXU_SS);
+	/* mix = modulo & clamp */
+	MXU_S32AND(MXU_XR13, MXU_XR13, MXU_XR10);
+	return MXU_S32M2I(MXU_XR13);
+}
+
+/* BM dispatch for pair blends; BM is clamped so BM==-1 (no blend) callers
+ * never instantiate an undefined gpuBlendingGeneric<-1> body. */
+template<int BM>
+static inline u32 mxu_blend_pair(u32 uSrc, u32 uDst)
+{
+	if (BM == 2)
+		return mxu_blend_pair_sub(uSrc, uDst);
+	return gpuBlendPairSWAR<(BM < 0 ? 0 : BM)>(uSrc, uDst);
+}
+
+/* Single-pixel blend for span heads/tails — scalar reference directly. */
+template<int BM>
+static inline uint_fast16_t mxu_blend_one(uint_fast16_t uSrc, uint_fast16_t uDst)
+{
+	if (BM < 0)
+		return uSrc;
+	return gpuBlendingGeneric<(BM < 0 ? 0 : BM), false>(uSrc, uDst);
+}
+
+/* CF 0x000 (+0x100 MASKSET twin): untextured flat fill, no blend/mask —
+ * 24% of Crash's pixels. Word stores via MXU (avoids u16*->u32*
+ * strict-aliasing UB). */
+template<bool MSET>
 static void poly_mxu_flat_fill(const gpu_unai_t &gpu_unai, le16_t *pDst, u32 count)
 {
 	u32 pix = gpu_unai.inn.PixelData;
+	if (MSET) pix |= 0x8000;
 	MXU_S32I2M(MXU_XR16, 1);
 	MXU_S32I2M(MXU_XR1, pix | (pix << 16));
 	if ((uintptr_t)pDst & 2) {
@@ -97,7 +158,8 @@ static void poly_mxu_flat_fill(const gpu_unai_t &gpu_unai, le16_t *pDst, u32 cou
 		*pDst = u16_to_le16(pix);
 }
 
-/* CF 0x081: untextured gouraud, no blend/mask/dither */
+/* CF 0x081 (+0x181 MASKSET twin): untextured gouraud, no blend/mask/dither */
+template<bool MSET>
 static void poly_mxu_utx_gouraud(const gpu_unai_t &gpu_unai, le16_t *pDst, u32 count)
 {
 	const gpu_unai_inner_t &inn = gpu_unai.inn;
@@ -105,7 +167,8 @@ static void poly_mxu_utx_gouraud(const gpu_unai_t &gpu_unai, le16_t *pDst, u32 c
 
 	MXU_S32I2M(MXU_XR16, 1);
 	if ((uintptr_t)pDst & 2) {
-		*pDst++ = u16_to_le16((r >> 11) | ((g >> 6) & 0x3e0) | ((b >> 1) & 0x7c00));
+		*pDst++ = u16_to_le16(((r >> 11) | ((g >> 6) & 0x3e0) | ((b >> 1) & 0x7c00))
+		                      | (MSET ? 0x8000 : 0));
 		r = (u16)(r + inn.gInc.c.r);
 		g = (u16)(g + inn.gInc.c.g);
 		b = (u16)(b + inn.gInc.c.b);
@@ -120,6 +183,8 @@ static void poly_mxu_utx_gouraud(const gpu_unai_t &gpu_unai, le16_t *pDst, u32 c
 	MXU_S32I2M(MXU_XR6, (((2 * db) & 0xffff) << 16) | ((2 * db) & 0xffff));
 	MXU_S32I2M(MXU_XR14, 0x03e003e0);
 	MXU_S32I2M(MXU_XR15, 0x7c007c00);
+	if (MSET)
+		MXU_S32I2M(MXU_XR10, 0x80008000);
 
 	while (count >= 2) {
 		MXU_Q16SLR(MXU_XR7, MXU_XR1, MXU_XR0, MXU_XR0, 11);
@@ -129,6 +194,8 @@ static void poly_mxu_utx_gouraud(const gpu_unai_t &gpu_unai, le16_t *pDst, u32 c
 		MXU_S32AND(MXU_XR9, MXU_XR9, MXU_XR15);
 		MXU_S32OR(MXU_XR7, MXU_XR7, MXU_XR8);
 		MXU_S32OR(MXU_XR7, MXU_XR7, MXU_XR9);
+		if (MSET)
+			MXU_S32OR(MXU_XR7, MXU_XR7, MXU_XR10);
 		MXU_S32STD(MXU_XR7, pDst);
 		MXU_Q16ADD(MXU_XR1, MXU_XR1, MXU_XR4, MXU_XR0, MXU_WW, MXU_AA);
 		MXU_Q16ADD(MXU_XR2, MXU_XR2, MXU_XR5, MXU_XR0, MXU_WW, MXU_AA);
@@ -140,8 +207,91 @@ static void poly_mxu_utx_gouraud(const gpu_unai_t &gpu_unai, le16_t *pDst, u32 c
 		u32 lr = MXU_S32M2I(MXU_XR1) & 0xffff;
 		u32 lg = MXU_S32M2I(MXU_XR2) & 0xffff;
 		u32 lb = MXU_S32M2I(MXU_XR3) & 0xffff;
-		*pDst = u16_to_le16((lr >> 11) | ((lg >> 6) & 0x3e0) | ((lb >> 1) & 0x7c00));
+		*pDst = u16_to_le16(((lr >> 11) | ((lg >> 6) & 0x3e0) | ((lb >> 1) & 0x7c00))
+		                    | (MSET ? 0x8000 : 0));
 	}
+}
+
+/* Untextured BLEND spans: flat (GOU=0, CF 0x002|BM<<3) and gouraud
+ * (GOU=1, CF 0x083|BM<<3), + MASKSET twins (|0x100). Scalar semantics
+ * (gpuPolySpanFn untextured branches): source color has bit15 clear by
+ * construction (GPU_RGB16 / gpuLightingRGB top out at bit14), every pixel
+ * blends with dst unconditionally, every pixel is stored (no MASKCHECK). */
+template<bool GOU, int BM, bool MSET>
+static void poly_mxu_utx_blend(const gpu_unai_t &gpu_unai, le16_t *pDst, u32 count)
+{
+	const gpu_unai_inner_t &inn = gpu_unai.inn;
+	u32 r = 0, g = 0, b = 0, pix = 0;
+	if (GOU) { r = inn.gCol.c.r; g = inn.gCol.c.g; b = inn.gCol.c.b; }
+	else       pix = inn.PixelData;
+
+	MXU_S32I2M(MXU_XR16, 1);
+
+	/* scalar single pixel (head/tail); steps the gouraud accumulators */
+#define UTXB_ONE() do { \
+		uint_fast16_t s_ = GOU \
+			? ((r >> 11) | ((g >> 6) & 0x3e0) | ((b >> 1) & 0x7c00)) \
+			: pix; \
+		s_ = mxu_blend_one<BM>(s_, le16_to_u16(*pDst)); \
+		*pDst = u16_to_le16((u16)(MSET ? (s_ | 0x8000) : s_)); \
+		pDst++; \
+		if (GOU) { \
+			r = (u16)(r + inn.gInc.c.r); \
+			g = (u16)(g + inn.gInc.c.g); \
+			b = (u16)(b + inn.gInc.c.b); \
+		} \
+	} while (0)
+
+	if ((uintptr_t)pDst & 2) {
+		UTXB_ONE();
+		if (!--count) return;
+	}
+
+	u32 src_pair = pix | (pix << 16);
+	if (GOU) {
+		/* NOT mxu_gouraud_setup(inn): the head pixel may have stepped the
+		 * local accumulators past inn.gCol — load from the locals. */
+		u32 dr = inn.gInc.c.r, dg = inn.gInc.c.g, db = inn.gInc.c.b;
+		MXU_S32I2M(MXU_XR1, (((r + dr) & 0xffff) << 16) | r);
+		MXU_S32I2M(MXU_XR2, (((g + dg) & 0xffff) << 16) | g);
+		MXU_S32I2M(MXU_XR3, (((b + db) & 0xffff) << 16) | b);
+		MXU_S32I2M(MXU_XR4, (((2 * dr) & 0xffff) << 16) | ((2 * dr) & 0xffff));
+		MXU_S32I2M(MXU_XR5, (((2 * dg) & 0xffff) << 16) | ((2 * dg) & 0xffff));
+		MXU_S32I2M(MXU_XR6, (((2 * db) & 0xffff) << 16) | ((2 * db) & 0xffff));
+		MXU_S32I2M(MXU_XR14, 0x03e003e0);
+		MXU_S32I2M(MXU_XR15, 0x7c007c00);
+	}
+
+	while (count >= 2) {
+		if (GOU) {
+			MXU_Q16SLR(MXU_XR7, MXU_XR1, MXU_XR0, MXU_XR0, 11);
+			MXU_Q16SLR(MXU_XR8, MXU_XR2, MXU_XR0, MXU_XR0, 6);
+			MXU_Q16SLR(MXU_XR9, MXU_XR3, MXU_XR0, MXU_XR0, 1);
+			MXU_S32AND(MXU_XR8, MXU_XR8, MXU_XR14);
+			MXU_S32AND(MXU_XR9, MXU_XR9, MXU_XR15);
+			MXU_S32OR(MXU_XR7, MXU_XR7, MXU_XR8);
+			MXU_S32OR(MXU_XR7, MXU_XR7, MXU_XR9);
+			src_pair = MXU_S32M2I(MXU_XR7);
+			mxu_gouraud_step_pair();
+		}
+		u32 dst;
+		memcpy(&dst, pDst, 4);  /* word-aligned after head; sw/lw via memcpy
+		                           sidesteps le16_t* aliasing UB */
+		u32 out = mxu_blend_pair<BM>(src_pair, dst);
+		if (MSET) out |= 0x80008000;
+		memcpy(pDst, &out, 4);
+		pDst += 2;
+		count -= 2;
+	}
+	if (count) {
+		if (GOU) {  /* pull live accumulators back for the scalar tail */
+			r = MXU_S32M2I(MXU_XR1) & 0xffff;
+			g = MXU_S32M2I(MXU_XR2) & 0xffff;
+			b = MXU_S32M2I(MXU_XR3) & 0xffff;
+		}
+		UTXB_ONE();
+	}
+#undef UTXB_ONE
 }
 
 /* textured fetch, one texel; TM = CF_TEXTMODE. Copied verbatim from
@@ -170,10 +320,14 @@ static inline uint_fast16_t mxu_fetch_texel(u32 l_u, u32 l_v, u32 mask_v00u,
 }
 
 /* CF 0x021/0x041/0x061 (GOURAUD=0) and 0x0a1/0x0c1/0x0e1 (GOURAUD=1):
- * lit textured, no blend/maskcheck/dither. MSET=CF_MASKSET (bit8): force the
+ * lit textured, no maskcheck/dither. MSET=CF_MASKSET (bit8): force the
  * PS1 mask bit (0x8000) set on every written pixel, exactly as the scalar path
- * does (uSrc | 0x8000) — cheap OR, unlocks the 0x1a1/0x121/0x141 buckets. */
-template<int TM, bool GOU, bool MSET>
+ * does (uSrc | 0x8000) — cheap OR, unlocks the 0x1a1/0x121/0x141 buckets.
+ * BM = CF_BLENDMODE when CF_BLEND (bit1) is set, else -1: per scalar
+ * semantics, only texels whose LIT result has bit15 (the texture mask bit,
+ * preserved by lighting) blend with dst; others store the lit color as-is.
+ * The per-lane select uses the SWAR sign-mask trick (gpuMaskLanesSWAR). */
+template<int TM, bool GOU, bool MSET, int BM = -1>
 static void poly_mxu_tx_lit(const gpu_unai_t &gpu_unai, le16_t *pDst, u32 count)
 {
 	const gpu_unai_inner_t &inn = gpu_unai.inn;
@@ -208,6 +362,17 @@ static void poly_mxu_tx_lit(const gpu_unai_t &gpu_unai, le16_t *pDst, u32 count)
 		}
 		if (t0 | t1) {
 			u32 res = mxu_light_pair(((u32)t1 << 16) | t0);
+			if (BM >= 0) {
+				u32 m = res & 0x80008000;
+				if (m) {
+					/* pDst may be 2-aligned only: two lhu, not lw */
+					u32 dst = ((u32)le16_to_u16(pDst[1]) << 16)
+					        |       le16_to_u16(pDst[0]);
+					u32 bl  = mxu_blend_pair<BM>(res, dst) | 0x80008000;
+					u32 sel = gpuMaskLanesSWAR(res);
+					res = (bl & sel) | (res & ~sel);
+				}
+			}
 			if (MSET) res |= 0x80008000;
 			if (t0) pDst[0] = u16_to_le16((u16)res);
 			if (t1) pDst[1] = u16_to_le16((u16)(res >> 16));
@@ -229,11 +394,15 @@ static void poly_mxu_tx_lit(const gpu_unai_t &gpu_unai, le16_t *pDst, u32 count)
 				u32 bgr = inn.bgr0888;
 				lr = (bgr >> 3) & 0x1f; lg = (bgr >> 11) & 0x1f; lb = bgr >> 19;
 			}
-			*pDst = u16_to_le16(
+			uint_fast16_t s =
 				(gpu_unai.LightLUT[((t & 0x7c00) >> 5) | lb] << 10) |
 				(gpu_unai.LightLUT[ (t & 0x03e0)       | lg] << 5) |
 				(gpu_unai.LightLUT[((t & 0x001f) << 5) | lr]) |
-				(MSET ? 0x8000 : (t & 0x8000)));
+				(t & 0x8000);
+			if (BM >= 0 && (s & 0x8000))
+				s = mxu_blend_one<BM>(s, le16_to_u16(*pDst)) | 0x8000;
+			if (MSET) s |= 0x8000;
+			*pDst = u16_to_le16((u16)s);
 		}
 	}
 }
@@ -257,8 +426,10 @@ static void PolySpanMaybeMXU(const gpu_unai_t &gpu_unai, le16_t *pDst, u32 count
 		fn; return; \
 	} while (0)
 		switch (CF) {
-		case 0x000: MXU_TAKE(poly_mxu_flat_fill(gpu_unai, pDst, count));
-		case 0x081: MXU_TAKE(poly_mxu_utx_gouraud(gpu_unai, pDst, count));
+		case 0x000: MXU_TAKE((poly_mxu_flat_fill<false>(gpu_unai, pDst, count)));
+		case 0x100: MXU_TAKE((poly_mxu_flat_fill<true >(gpu_unai, pDst, count)));
+		case 0x081: MXU_TAKE((poly_mxu_utx_gouraud<false>(gpu_unai, pDst, count)));
+		case 0x181: MXU_TAKE((poly_mxu_utx_gouraud<true >(gpu_unai, pDst, count)));
 		case 0x021: MXU_TAKE((poly_mxu_tx_lit<1, false, false>(gpu_unai, pDst, count)));
 		case 0x041: MXU_TAKE((poly_mxu_tx_lit<2, false, false>(gpu_unai, pDst, count)));
 		case 0x061: MXU_TAKE((poly_mxu_tx_lit<3, false, false>(gpu_unai, pDst, count)));
@@ -273,6 +444,39 @@ static void PolySpanMaybeMXU(const gpu_unai_t &gpu_unai, le16_t *pDst, u32 count
 		case 0x1a1: MXU_TAKE((poly_mxu_tx_lit<1, true,  true>(gpu_unai, pDst, count)));
 		case 0x1c1: MXU_TAKE((poly_mxu_tx_lit<2, true,  true>(gpu_unai, pDst, count)));
 		case 0x1e1: MXU_TAKE((poly_mxu_tx_lit<3, true,  true>(gpu_unai, pDst, count)));
+		/* BLEND (bit1) variants, CF = base | 0x002 | BM<<3 (+0x100 MASKSET).
+		 * Textured-lit: SWAR pair blend (modes 0/1/3) / MXU lanes (mode 2),
+		 * per-lane selected on the texture mask bit. MGS blend spans were
+		 * 33% of its rasterized pixels, Ape Escape 18%, CTR 9%. */
+#define MXU_TXB(base, TM, GOU) \
+		case (base)|0x002: MXU_TAKE((poly_mxu_tx_lit<TM, GOU, false, 0>(gpu_unai, pDst, count))); \
+		case (base)|0x00a: MXU_TAKE((poly_mxu_tx_lit<TM, GOU, false, 1>(gpu_unai, pDst, count))); \
+		case (base)|0x012: MXU_TAKE((poly_mxu_tx_lit<TM, GOU, false, 2>(gpu_unai, pDst, count))); \
+		case (base)|0x01a: MXU_TAKE((poly_mxu_tx_lit<TM, GOU, false, 3>(gpu_unai, pDst, count))); \
+		case (base)|0x102: MXU_TAKE((poly_mxu_tx_lit<TM, GOU, true,  0>(gpu_unai, pDst, count))); \
+		case (base)|0x10a: MXU_TAKE((poly_mxu_tx_lit<TM, GOU, true,  1>(gpu_unai, pDst, count))); \
+		case (base)|0x112: MXU_TAKE((poly_mxu_tx_lit<TM, GOU, true,  2>(gpu_unai, pDst, count))); \
+		case (base)|0x11a: MXU_TAKE((poly_mxu_tx_lit<TM, GOU, true,  3>(gpu_unai, pDst, count)));
+		MXU_TXB(0x021, 1, false)
+		MXU_TXB(0x041, 2, false)
+		MXU_TXB(0x061, 3, false)
+		MXU_TXB(0x0a1, 1, true)
+		MXU_TXB(0x0c1, 2, true)
+		MXU_TXB(0x0e1, 3, true)
+#undef MXU_TXB
+		/* Untextured blend: flat 0x002|BM<<3, gouraud 0x083|BM<<3 (+0x100) */
+#define MXU_UTXB(base, GOU) \
+		case (base):       MXU_TAKE((poly_mxu_utx_blend<GOU, 0, false>(gpu_unai, pDst, count))); \
+		case (base)|0x008: MXU_TAKE((poly_mxu_utx_blend<GOU, 1, false>(gpu_unai, pDst, count))); \
+		case (base)|0x010: MXU_TAKE((poly_mxu_utx_blend<GOU, 2, false>(gpu_unai, pDst, count))); \
+		case (base)|0x018: MXU_TAKE((poly_mxu_utx_blend<GOU, 3, false>(gpu_unai, pDst, count))); \
+		case (base)|0x100: MXU_TAKE((poly_mxu_utx_blend<GOU, 0, true >(gpu_unai, pDst, count))); \
+		case (base)|0x108: MXU_TAKE((poly_mxu_utx_blend<GOU, 1, true >(gpu_unai, pDst, count))); \
+		case (base)|0x110: MXU_TAKE((poly_mxu_utx_blend<GOU, 2, true >(gpu_unai, pDst, count))); \
+		case (base)|0x118: MXU_TAKE((poly_mxu_utx_blend<GOU, 3, true >(gpu_unai, pDst, count)));
+		MXU_UTXB(0x002, false)
+		MXU_UTXB(0x083, true)
+#undef MXU_UTXB
 		}
 #undef MXU_TAKE
 	}

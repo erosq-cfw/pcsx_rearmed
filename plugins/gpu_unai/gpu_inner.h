@@ -269,7 +269,25 @@ static inline void gpuTileSpanFn(le16_t *pDst, u16 data, u32 count)
 			ldata = u16_to_le16(data | 0x8000);
 		else
 			ldata = u16_to_le16(data);
+#if defined(__mips__) && defined(GPU_UNAI_USE_MXU)
+		/* EROSQ: word stores for plain tile fills (fades/dialogs are wide
+		 * spans). LE-only target: pair the raw halfword; memcpy avoids
+		 * le16_t*->u32* aliasing UB and compiles to a single sw. */
+		{
+			u16 raw = CF_MASKSET ? (u16)(data | 0x8000) : data;
+			if ((uintptr_t)pDst & 2) {
+				*pDst++ = ldata;
+				if (!--count) return;
+			}
+			u32 dpair = raw | ((u32)raw << 16);
+			for (; count >= 2; count -= 2, pDst += 2)
+				memcpy(pDst, &dpair, 4);
+			if (count)
+				*pDst = ldata;
+		}
+#else
 		do { *pDst++ = ldata; } while (--count);
+#endif
 	} else if (CF_MASKCHECK && !CF_BLEND) {
 		if (CF_MASKSET)
 			ldata = u16_to_le16(data | 0x8000);
@@ -306,6 +324,13 @@ template<int CF>
 static noinline void gpuTileDriverFn(le16_t *pDst, u16 data, u32 count,
 	const gpu_unai_inner_t &inn)
 {
+#if defined(__mips__) && defined(GPU_UNAI_USE_MXU)
+	if (unlikely(gpu_hist_on)) {
+		gpu_hist_tile_prim[CF & 0x3ff]++;
+		gpu_hist_tile_px[CF & 0x3ff] +=
+			(unsigned long long)count * (inn.y1 > inn.y0 ? inn.y1 - inn.y0 : 0);
+	}
+#endif
 	const int li=gpu_unai.inn.ilace_mask;
 	const int pi=(ProgressiveInterlaceEnabled()?(gpu_unai.inn.ilace_mask+1):0);
 	const int pif=(ProgressiveInterlaceEnabled()?(gpu_unai.prog_ilace_flag?(gpu_unai.inn.ilace_mask+1):0):1);
@@ -388,6 +413,13 @@ template<int CF>
 static noinline void gpuSpriteDriverFn(le16_t *pPixel, u32 count, const u8 *pTxt_base,
 	const gpu_unai_inner_t &inn)
 {
+#if defined(__mips__) && defined(GPU_UNAI_USE_MXU)
+	if (unlikely(gpu_hist_on)) {
+		gpu_hist_sprite_prim[CF & 0x3ff]++;
+		gpu_hist_sprite_px[CF & 0x3ff] +=
+			(unsigned long long)count * (inn.y1 > inn.y0 ? inn.y1 - inn.y0 : 0);
+	}
+#endif
 	uint_fast16_t uSrc, uDst;
 	bool should_blend;
 	u32 u0_mask = inn.mask_v00u & 0xff;

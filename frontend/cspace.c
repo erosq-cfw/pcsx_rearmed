@@ -9,6 +9,7 @@
  */
 
 #include <stdint.h>
+#include <string.h>
 #include "cspace.h"
 #include "compiler_features.h"
 
@@ -158,6 +159,26 @@ void attr_weak bgr888_to_rgb565(void * __restrict__ dst_,
 	const uint8_t * __restrict__ src = src_;
 	uint32_t * __restrict__ dst = dst_;
 
+#if defined(__mips__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+	//  EROSQ: this convert is 8-11% of frame time during 24bpp FMV and the
+	// generic path costs 6 byte loads per 2 pixels. Take 3 word loads ->
+	// 4 pixels instead; 24bpp rows can be arbitrarily byte-aligned so the
+	// loads go through memcpy (gcc emits lwl/lwr when unaligned is
+	// possible; still 2 loads for 4 pixels' worth of channel bytes).
+	// Bit-exact vs bgr888_to_rgb565_pair (host-tested, test_cspace888.cpp).
+	for (; pixels >= 4; pixels -= 4, src += 3*4, dst += 2) {
+		uint32_t w0, w1, w2;
+		memcpy(&w0, src + 0, 4);   /* r0 g0 b0 r1 */
+		memcpy(&w1, src + 4, 4);   /* g1 b1 r2 g2 */
+		memcpy(&w2, src + 8, 4);   /* b2 r3 g3 b3 */
+		uint32_t px0 = ((w0 & 0xf8) << 8)      | ((w0 >>  5) & 0x07e0) | ((w0 >> 19) & 0x1f);
+		uint32_t px1 = ((w0 >> 16) & 0xf800)   | ((w1 & 0xfc) << 3)    | ((w1 >> 11) & 0x1f);
+		uint32_t px2 = ((w1 >>  8) & 0xf800)   | ((w1 >> 21) & 0x07e0) | ((w2 >>  3) & 0x1f);
+		uint32_t px3 = ( w2        & 0xf800)   | ((w2 >> 13) & 0x07e0) | ((w2 >> 27) & 0x1f);
+		dst[0] = px0 | (px1 << 16);
+		dst[1] = px2 | (px3 << 16);
+	}
+#endif
 	for (; pixels >= 2; pixels -= 2, src += 3*2, dst++)
 		*dst = bgr888_to_rgb565_pair(src, 0, 3);
 }

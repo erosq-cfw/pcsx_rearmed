@@ -12,6 +12,7 @@
 #define __GPULIB_GPU_H__
 
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include "../../include/compiler_features.h"
 
@@ -170,6 +171,32 @@ int  prim_try_simplify_quad_gt(void *simplified, const void *prim);
 
 void cpy_mask(uint16_t *dst, const uint16_t *src, int l, uint32_t r6);
 
+#if defined(__mips__) && !defined(__mips64)
+/*  EROSQ A/B probe (EROSQ_PREF30=1): `pref 30` (PrepareForStore) on the
+ * VRAM destination of image writes skips the read-for-ownership refill of
+ * cache lines that are about to be fully overwritten — FMV pushes ~460KB
+ * of RAM->VRAM traffic per frame through here.
+ *  ⚠️MEASURED DEAD on the X1000 2026-07-16: Rage Racer FMV intro uncapped
+ * A/B was 79.9 vs 80.1 mean vsps, worst-third identical — XBurst either
+ * no-ops hint 30 or the refill wasn't the bottleneck. Kept only as an
+ * inert probe; do not re-propose.
+ * Some cores zero-fill the prepared line, which is only correct because
+ * every byte of it is then written: pref is issued only for fully-written
+ * 32-byte-aligned chunks (X1000 D-line = 32B); head/tail use plain copy. */
+static inline void vram_line_copy_pref30(uint16_t *dst, const uint16_t *src, int l)
+{
+  int head = (int)((32 - ((uintptr_t)dst & 31)) & 31) / 2;
+  if (head > l) head = l;
+  memcpy(dst, src, head * 2);
+  dst += head; src += head; l -= head;
+  for (; l >= 16; dst += 16, src += 16, l -= 16) {
+    __asm__ __volatile__("pref 30, 0(%0)" :: "r"(dst) : "memory");
+    memcpy(dst, src, 32);
+  }
+  memcpy(dst, src, l * 2);
+}
+#endif
+
 static inline void do_vram_line(uint16_t *vram_, int x, int y,
     uint16_t *mem, int l, int is_read, uint32_t r6)
 {
@@ -178,8 +205,20 @@ static inline void do_vram_line(uint16_t *vram_, int x, int y,
     memcpy(mem, vram, l * 2);
   else if (unlikely(r6))
     cpy_mask(vram, mem, l, r6);
-  else
+  else {
+#if defined(__mips__) && !defined(__mips64)
+    static int pref30 = -1;
+    if (unlikely(pref30 < 0)) {
+      const char *e = getenv("EROSQ_PREF30");
+      pref30 = e && *e && *e != '0';
+    }
+    if (pref30) {
+      vram_line_copy_pref30(vram, mem, l);
+      return;
+    }
+#endif
     memcpy(vram, mem, l * 2);
+  }
 }
 
 /* listing these here for correct linkage if rasterizer uses c++ */
