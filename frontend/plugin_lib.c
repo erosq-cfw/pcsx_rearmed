@@ -16,6 +16,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <signal.h>
 #include <assert.h>
 
 #include "libpicofe/fonts.h"
@@ -952,6 +953,17 @@ static void *watchdog_thread(void *unused)
 	int vsync_cnt_old = 0;
 	int seen_dead = 0;
 	int sleep_time = 5;
+	sigset_t sigs;
+
+	/* EROSQ: the SIGPROF sampler (EROSQ_SAMPLE) delivers to any thread;
+	 * nanosleep is not SA_RESTART-restartable, so an unmasked watchdog
+	 * polls every ~10ms and aborts on any >50ms frame gap. Mask the
+	 * profiling/dump signals here — they belong on the emu thread. */
+	sigemptyset(&sigs);
+	sigaddset(&sigs, SIGPROF);
+	sigaddset(&sigs, SIGUSR1);
+	sigaddset(&sigs, SIGUSR2);
+	pthread_sigmask(SIG_BLOCK, &sigs, NULL);
 
 	while (1)
 	{

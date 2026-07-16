@@ -300,6 +300,36 @@ static inline void gpuTileSpanFn(le16_t *pDst, u16 data, u32 count)
 		} while (--count);
 	} else
 	{
+#if defined(__mips__) && defined(GPU_UNAI_USE_MXU)
+		/* EROSQ: blend-fill tiles (const src, sequential dst) pair up via
+		 * the poly blend machinery — SWAR for modes 0/1/3, MXU lanes for
+		 * mode 2. data has bit15 clear (GPU_RGB16), so the <BM,true>
+		 * scalar semantics match the src-masking pair kernels exactly.
+		 * Ape Escape attract: TILE 0x00a = 27M px, Tomb Raider LR: TILE
+		 * 0x012 = 7.7M px, previously all scalar read-modify-write. */
+		if (CF_BLEND && !CF_MASKCHECK && mxu_spans_on) {
+			if (CF_BLENDMODE == 2)
+				MXU_S32I2M(MXU_XR16, 1);
+			u32 spair = (u32)data | ((u32)data << 16);
+			if ((uintptr_t)pDst & 2) {
+				uint_fast16_t s1 = gpuBlending<CF_BLENDMODE, true>(data, le16_to_u16(*pDst));
+				*pDst++ = u16_to_le16(CF_MASKSET ? (s1 | 0x8000) : s1);
+				if (!--count) return;
+			}
+			for (; count >= 2; count -= 2, pDst += 2) {
+				u32 dst, out;
+				memcpy(&dst, pDst, 4);
+				out = mxu_blend_pair<CF_BLENDMODE>(spair, dst);
+				if (CF_MASKSET) out |= 0x80008000;
+				memcpy(pDst, &out, 4);
+			}
+			if (count) {
+				uint_fast16_t s1 = gpuBlending<CF_BLENDMODE, true>(data, le16_to_u16(*pDst));
+				*pDst = u16_to_le16(CF_MASKSET ? (s1 | 0x8000) : s1);
+			}
+			return;
+		}
+#endif
 		uint_fast16_t uSrc, uDst;
 		do
 		{
@@ -547,12 +577,23 @@ static void SpriteNULL(le16_t *pPixel, u32 count, const u8 *pTxt_base,
 #else
 #define TA6(cf) TI(cf)
 #endif
+/* 16bpp lit sprites take the MXU pair kernel on the X1000 (covers the
+ * 0x061/0x161/0x063/0x163 buckets — MGS attract's top scalar pixels).
+ * TAX = cells that have an ARM asm driver AND an X1000 fast path (0x20
+ * 4bpp unlit: 2 texels per byte). */
+#if defined(__mips__) && defined(GPU_UNAI_USE_MXU)
+#define TMX(cf) SpriteMaybeMXU<(cf)>
+#define TAX(cf) SpriteMaybeMXU<(cf)>
+#else
+#define TMX(cf) TI(cf)
+#define TAX(cf) TA(cf)
+#endif
 #define TIBLOCK(ub) \
 	TN,            TN,            TN,            TN,            TN,            TN,            TN,            TN,            \
 	TN,            TN,            TN,            TN,            TN,            TN,            TN,            TN,            \
 	TN,            TN,            TN,            TN,            TN,            TN,            TN,            TN,            \
 	TN,            TN,            TN,            TN,            TN,            TN,            TN,            TN,            \
-	TA((ub)|0x20), TA6((ub)|0x21),TA6((ub)|0x22),TA6((ub)|0x23),TI((ub)|0x24), TI((ub)|0x25), TI((ub)|0x26), TI((ub)|0x27), \
+	TAX((ub)|0x20),TA6((ub)|0x21),TA6((ub)|0x22),TA6((ub)|0x23),TI((ub)|0x24), TI((ub)|0x25), TI((ub)|0x26), TI((ub)|0x27), \
 	TN,            TN,            TI((ub)|0x2a), TA6((ub)|0x2b),TN,            TN,            TI((ub)|0x2e), TI((ub)|0x2f), \
 	TN,            TN,            TI((ub)|0x32), TI((ub)|0x33), TN,            TN,            TI((ub)|0x36), TI((ub)|0x37), \
 	TN,            TN,            TI((ub)|0x3a), TI((ub)|0x3b), TN,            TN,            TI((ub)|0x3e), TI((ub)|0x3f), \
@@ -560,7 +601,7 @@ static void SpriteNULL(le16_t *pPixel, u32 count, const u8 *pTxt_base,
 	TN,            TN,            TI((ub)|0x4a), TA6((ub)|0x4b),TN,            TN,            TI((ub)|0x4e), TI((ub)|0x4f), \
 	TN,            TN,            TI((ub)|0x52), TI((ub)|0x53), TN,            TN,            TI((ub)|0x56), TI((ub)|0x57), \
 	TN,            TN,            TI((ub)|0x5a), TI((ub)|0x5b), TN,            TN,            TI((ub)|0x5e), TI((ub)|0x5f), \
-	TA((ub)|0x60), TI((ub)|0x61), TI((ub)|0x62), TI((ub)|0x63), TI((ub)|0x64), TI((ub)|0x65), TI((ub)|0x66), TI((ub)|0x67), \
+	TA((ub)|0x60), TMX((ub)|0x61),TI((ub)|0x62), TMX((ub)|0x63),TI((ub)|0x64), TI((ub)|0x65), TI((ub)|0x66), TI((ub)|0x67), \
 	TN,            TN,            TI((ub)|0x6a), TI((ub)|0x6b), TN,            TN,            TI((ub)|0x6e), TI((ub)|0x6f), \
 	TN,            TN,            TI((ub)|0x72), TI((ub)|0x73), TN,            TN,            TI((ub)|0x76), TI((ub)|0x77), \
 	TN,            TN,            TI((ub)|0x7a), TI((ub)|0x7b), TN,            TN,            TI((ub)|0x7e), TI((ub)|0x7f)
@@ -574,6 +615,8 @@ const PS gpuSpriteDrivers[256] = {
 #undef TIBLOCK
 #undef TA
 #undef TA6
+#undef TMX
+#undef TAX
 
 // this tries to avoid pointer shifting
 #define DITHER_LKUP(lut, dst) \

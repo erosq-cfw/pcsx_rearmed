@@ -38,6 +38,46 @@ static unsigned long long gpu_hist_span[1024], gpu_hist_px[1024];
 static unsigned long long gpu_hist_sprite_prim[1024], gpu_hist_sprite_px[1024];
 static unsigned long long gpu_hist_tile_prim[1024], gpu_hist_tile_px[1024];
 
+#ifdef GPU_MXU_HOST_TEST
+/* Host-test models of the two asm cores, with the exact semantics the
+ * silicon versions were validated against (mxutest harness 2026-07-14):
+ * lighting = LightLUT per channel with lanes from host_xr[7..9], blend
+ * mode 2 = per-lane mod-2^16 Blargg. test_sprite_tile_kernels.cpp
+ * pre-defines host_xr[] and stubs the raw MXU_* macros, then diffs the
+ * sprite/tile kernels against the scalar drivers on the host. */
+static inline u32 mxu_light_pair(u32 tw)
+{
+	u32 out = 0;
+	for (int lane = 0; lane < 2; lane++) {
+		u32 t  = (tw >> (lane*16)) & 0xffff;
+		u32 r5 = (host_xr[7] >> (lane*16)) & 0x1f;
+		u32 g5 = (host_xr[8] >> (lane*16)) & 0x1f;
+		u32 b5 = (host_xr[9] >> (lane*16)) & 0x1f;
+		u32 s = ((u32)gpu_unai.LightLUT[((t & 0x7c00) >> 5) | b5] << 10)
+		      | ((u32)gpu_unai.LightLUT[ (t & 0x03e0)       | g5] << 5)
+		      |  (u32)gpu_unai.LightLUT[((t & 0x001f) << 5) | r5]
+		      | (t & 0x8000);
+		out |= s << (lane*16);
+	}
+	return out;
+}
+static inline u32 mxu_blend_pair_sub(u32 uSrc, u32 uDst)
+{
+	u32 out = 0;
+	for (int lane = 0; lane < 2; lane++) {
+		u32 s = (uSrc >> (lane*16)) & 0x7fff, d = (uDst >> (lane*16)) & 0x7fff;
+		u32 diff    = (d - s + 0x8420) & 0xffff;
+		u32 low     = (d ^ s) & 0x8420;
+		u32 borrows = (diff - low) & 0x8420;
+		u32 modulo  = (diff - borrows) & 0xffff;
+		u32 clamp   = (borrows - (borrows >> 5)) & 0xffff;
+		out |= (modulo & clamp) << (lane*16);
+	}
+	return out;
+}
+#else /* !GPU_MXU_HOST_TEST — the real silicon cores (light here, blend-2
+       * further down; the gouraud helpers between them are raw-macro-only
+       * and stay common, compiled against the test's stub macros) */
 /* Shared 2-pixel lighting core. Texel pair in xr10, 5-bit light lanes in
  * xr7/8/9 (r/g/b), xr14 = 0x001f001f, xr15 = 0x80008000.
  * Returns lit bgr555 pair; equals LightLUT[t5*32+l5] per channel. */
@@ -65,6 +105,7 @@ static inline u32 mxu_light_pair(u32 tw)
 	MXU_S32OR(MXU_XR11, MXU_XR11, MXU_XR12);
 	return MXU_S32M2I(MXU_XR11);
 }
+#endif /* GPU_MXU_HOST_TEST (light core) */
 
 /* load gouraud pair-accumulators: xr1/2/3 = [c+dc : c], xr4/5/6 = [2dc : 2dc] */
 static inline void mxu_gouraud_setup(const gpu_unai_inner_t &inn)
@@ -86,6 +127,7 @@ static inline void mxu_gouraud_step_pair(void)
 	MXU_Q16ADD(MXU_XR3, MXU_XR3, MXU_XR6, MXU_XR0, MXU_WW, MXU_AA);
 }
 
+#ifndef GPU_MXU_HOST_TEST
 /* Blend a packed 2-pixel pair per gpuBlendingGeneric<BM, false> semantics.
  * Modes 0/1/3 are cross-lane-safe in plain GPR SWAR (gpu_blend_swar.h,
  * host-tested bit-exact). Mode 2 computes dst - src + 0x8420 (17 bits per
@@ -116,6 +158,7 @@ static inline u32 mxu_blend_pair_sub(u32 uSrc, u32 uDst)
 	MXU_S32AND(MXU_XR13, MXU_XR13, MXU_XR10);
 	return MXU_S32M2I(MXU_XR13);
 }
+#endif /* GPU_MXU_HOST_TEST */
 
 /* BM dispatch for pair blends; BM is clamped so BM==-1 (no blend) callers
  * never instantiate an undefined gpuBlendingGeneric<-1> body. */
@@ -405,6 +448,162 @@ static void poly_mxu_tx_lit(const gpu_unai_t &gpu_unai, le16_t *pDst, u32 count)
 			*pDst = u16_to_le16((u16)s);
 		}
 	}
+}
+
+/* ------------------------------------------------------------------
+ * Sprite fast paths (CF 0x061/0x161 lit, 0x063/0x163 lit+blend-0).
+ * Sprites walk u+1 per pixel, so 16bpp texels are plain sequential lhu
+ * pairs — no gather, unlike poly spans — and the LightLUT cost (3
+ * lookups/px) collapses into mxu_light_pair (bit-exact, silicon-
+ * validated). Caller guarantees the whole row stays inside the texture
+ * window (contiguous u mask, no wrap); v wrap is handled per row.
+ * MGS attract measured these CFs at 98.7M px/125s, 100% scalar before.
+ * TM: 2 = 8bpp CLUT, 3 = 16bpp (instantiate per histogram only). */
+template<int TM, int BM, bool MSET>
+static void sprite_mxu_lit(le16_t *pPixel, u32 count, const u8 *pTxt_base,
+	const gpu_unai_inner_t &inn)
+{
+	u32 bgr = inn.bgr0888;
+	u32 r5 = (bgr >> 3) & 0x1f, g5 = (bgr >> 11) & 0x1f, b5 = bgr >> 19;
+	MXU_S32I2M(MXU_XR16, 1);
+	MXU_S32I2M(MXU_XR14, 0x001f001f);
+	MXU_S32I2M(MXU_XR15, 0x80008000);
+	MXU_S32I2M(MXU_XR7, (r5 << 16) | r5);
+	MXU_S32I2M(MXU_XR8, (g5 << 16) | g5);
+	MXU_S32I2M(MXU_XR9, (b5 << 16) | b5);
+
+	const u32 u_base = inn.u & (inn.mask_v00u & 0xff);
+	const u32 v_mask = inn.mask_v00u >> 24;
+	const le16_t *CBA_; if (TM != 3) CBA_ = inn.CBA;
+	s32 y0 = inn.y0, y1 = inn.y1, li = inn.ilace_mask;
+	u32 v0 = inn.v;
+
+	for (; y0 < y1; ++y0, pPixel += FRAME_WIDTH, ++v0) {
+		if (y0 & li) continue;
+		const u8 *pT = pTxt_base + (v0 & v_mask) * 2048
+		             + (TM == 3 ? u_base * 2 : u_base);
+		le16_t *pDst = pPixel;
+		u32 n = count;
+		for (; n >= 2; n -= 2, pDst += 2) {
+			u32 t0, t1;
+			if (TM == 3) {
+				t0 = le16_to_u16(((const le16_t *)pT)[0]);
+				t1 = le16_to_u16(((const le16_t *)pT)[1]);
+				pT += 4;
+			} else { /* TM == 2, 8bpp CLUT */
+				t0 = le16_to_u16(CBA_[pT[0]]);
+				t1 = le16_to_u16(CBA_[pT[1]]);
+				pT += 2;
+			}
+			if (!(t0 | t1)) continue;
+			u32 res = mxu_light_pair((t1 << 16) | t0);
+			if (BM >= 0) {
+				u32 m = res & 0x80008000;
+				if (m) {
+					/* pDst may be 2-aligned only: two lhu, not lw */
+					u32 dst = ((u32)le16_to_u16(pDst[1]) << 16)
+					        |       le16_to_u16(pDst[0]);
+					u32 bl  = mxu_blend_pair<BM>(res, dst) | 0x80008000;
+					u32 sel = gpuMaskLanesSWAR(res);
+					res = (bl & sel) | (res & ~sel);
+				}
+			}
+			if (MSET) res |= 0x80008000;
+			if (t0) pDst[0] = u16_to_le16((u16)res);
+			if (t1) pDst[1] = u16_to_le16((u16)(res >> 16));
+		}
+		if (n) { /* odd width: scalar tail via LightLUT (bit-identical) */
+			u32 t = (TM == 3) ? le16_to_u16(*(const le16_t *)pT)
+			                  : le16_to_u16(CBA_[*pT]);
+			if (t) {
+				uint_fast16_t s =
+					(gpu_unai.LightLUT[((t & 0x7c00) >> 5) | b5] << 10) |
+					(gpu_unai.LightLUT[ (t & 0x03e0)       | g5] << 5) |
+					(gpu_unai.LightLUT[((t & 0x001f) << 5) | r5]) |
+					(t & 0x8000);
+				if (BM >= 0 && (s & 0x8000))
+					s = mxu_blend_one<BM>(s, le16_to_u16(*pDst)) | 0x8000;
+				if (MSET) s |= 0x8000;
+				*pDst = u16_to_le16((u16)s);
+			}
+		}
+	}
+}
+
+/* 4bpp unlit sprites (CF 0x020/0x120): the scalar loop re-loads the same
+ * texture byte for both nibbles — one lbu serves two texels here (the
+ * measured 13→8 ins/px unroll). No MXU involved; sequential fetch only,
+ * so it shares SpriteMaybeMXU's no-wrap precondition. Ape: 8.1M px. */
+template<bool MSET>
+static void sprite_fast_unlit_4bpp(le16_t *pPixel, u32 count, const u8 *pTxt_base,
+	const gpu_unai_inner_t &inn)
+{
+	const u32 u_base = inn.u & (inn.mask_v00u & 0xff);
+	const u32 v_mask = inn.mask_v00u >> 24;
+	const le16_t *CBA_ = inn.CBA;
+	s32 y0 = inn.y0, y1 = inn.y1, li = inn.ilace_mask;
+	u32 v0 = inn.v;
+
+	for (; y0 < y1; ++y0, pPixel += FRAME_WIDTH, ++v0) {
+		if (y0 & li) continue;
+		const u8 *pT = pTxt_base + (v0 & v_mask) * 2048 + (u_base >> 1);
+		le16_t *pDst = pPixel;
+		u32 n = count;
+		if (u_base & 1) { /* head: odd u = high nibble of first byte */
+			u32 t = le16_to_u16(CBA_[(*pT++ >> 4) & 0xf]);
+			if (t) *pDst = u16_to_le16((u16)(MSET ? (t | 0x8000) : t));
+			pDst++;
+			if (!--n) continue;
+		}
+		for (; n >= 2; n -= 2, pDst += 2) {
+			u32 b  = *pT++;
+			u32 t0 = le16_to_u16(CBA_[b & 0xf]);
+			u32 t1 = le16_to_u16(CBA_[(b >> 4) & 0xf]);
+			if (t0) pDst[0] = u16_to_le16((u16)(MSET ? (t0 | 0x8000) : t0));
+			if (t1) pDst[1] = u16_to_le16((u16)(MSET ? (t1 | 0x8000) : t1));
+		}
+		if (n) { /* tail: even u = low nibble */
+			u32 t = le16_to_u16(CBA_[*pT & 0xf]);
+			if (t) *pDst = u16_to_le16((u16)(MSET ? (t | 0x8000) : t));
+		}
+	}
+}
+
+/* forward decl; template defined below in gpu_inner.h */
+template<int CF>
+static noinline void gpuSpriteDriverFn(le16_t *pPixel, u32 count, const u8 *pTxt_base,
+	const gpu_unai_inner_t &inn);
+
+template<int CF>
+static void SpriteMaybeMXU(le16_t *pPixel, u32 count, const u8 *pTxt_base,
+	const gpu_unai_inner_t &inn)
+{
+	/* Fast path needs the whole row inside the texture window: the u
+	 * mask must be contiguous low bits and (u & mask)+count-1 must not
+	 * wrap — the scalar loop masks u per pixel, the kernel doesn't. */
+	u32 u_mask = inn.mask_v00u & 0xff;
+	if (mxu_spans_on && count >= 2 &&
+	    (u_mask & (u_mask + 1)) == 0 &&
+	    (inn.u & u_mask) + count - 1 <= u_mask) {
+#define MXU_STAKE(fn) do { \
+		if (unlikely(gpu_hist_on)) { \
+			gpu_hist_sprite_prim[CF & 0x3ff]++; \
+			gpu_hist_sprite_px[CF & 0x3ff] += \
+				(unsigned long long)count * (inn.y1 > inn.y0 ? inn.y1 - inn.y0 : 0); \
+		} \
+		fn; return; \
+	} while (0)
+		switch (CF) {
+		case 0x061: MXU_STAKE((sprite_mxu_lit<3, -1, false>(pPixel, count, pTxt_base, inn)));
+		case 0x161: MXU_STAKE((sprite_mxu_lit<3, -1, true >(pPixel, count, pTxt_base, inn)));
+		case 0x063: MXU_STAKE((sprite_mxu_lit<3,  0, false>(pPixel, count, pTxt_base, inn)));
+		case 0x163: MXU_STAKE((sprite_mxu_lit<3,  0, true >(pPixel, count, pTxt_base, inn)));
+		case 0x020: MXU_STAKE((sprite_fast_unlit_4bpp<false>(pPixel, count, pTxt_base, inn)));
+		case 0x120: MXU_STAKE((sprite_fast_unlit_4bpp<true >(pPixel, count, pTxt_base, inn)));
+		}
+#undef MXU_STAKE
+	}
+	gpuSpriteDriverFn<CF>(pPixel, count, pTxt_base, inn);
 }
 
 /* forward decl; template defined below in gpu_inner.h */

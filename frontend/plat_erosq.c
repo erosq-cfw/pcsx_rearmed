@@ -188,7 +188,14 @@ static void sampler_init(void)
 	sa.sa_sigaction = prof_sig;
 	sa.sa_flags = SA_SIGINFO | SA_RESTART;
 	sigaction(SIGPROF, &sa, NULL);
-	signal(SIGUSR2, smpdump_handler);
+	{	/* sigaction, not signal(): repeat dumps must survive whatever
+		 * one-shot semantics the libc picks */
+		struct sigaction sa2;
+		memset(&sa2, 0, sizeof sa2);
+		sa2.sa_handler = smpdump_handler;
+		sa2.sa_flags = SA_RESTART;
+		sigaction(SIGUSR2, &sa2, NULL);
+	}
 	it.it_interval.tv_sec = 0; it.it_interval.tv_usec = 1000; /* 1 kHz */
 	it.it_value = it.it_interval;
 	setitimer(ITIMER_PROF, &it, NULL);
