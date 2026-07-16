@@ -36,6 +36,18 @@
 #include "memmap.h"
 #include "compiler_features.h"
 
+/* EROSQ Phase 6 (Part A): mipsrec's METHOD-1 fastmem needs PS1 RAM mirrored at
+ * a fixed virtual address. The mipsrec build sets -DMIPSREC_CUSTOM_MAP=1 and
+ * provides mipsrec_init_mmap() (mirrors RAM, repoints psxM/psxP/psxH/psxR)
+ * BEFORE the memRLUT/memWLUT below are built. All other builds compile this
+ * out entirely (flag defaults to 0), so their memory setup is byte-identical. */
+#ifndef MIPSREC_CUSTOM_MAP
+#define MIPSREC_CUSTOM_MAP 0
+#endif
+#if MIPSREC_CUSTOM_MAP
+int mipsrec_init_mmap(void);   /* libpcsxcore/mipsrec/recompiler.cpp */
+#endif
+
 #ifdef USE_LIBRETRO_VFS
 #include <streams/file_stream_transforms.h>
 #endif
@@ -238,8 +250,16 @@ int psxMemInit(void)
 
 	if (LIGHTREC_CUSTOM_MAP)
 		ret = lightrec_init_mmap();
+#if MIPSREC_CUSTOM_MAP
+	else {
+		ret = mipsrec_init_mmap();
+		if (ret)
+			ret = psxMemInitMap();   /* mirror map failed -> plain (METHOD-2) map */
+	}
+#else
 	else
 		ret = psxMemInitMap();
+#endif
 	if (ret) {
 		if (LIGHTREC_CUSTOM_MAP)
 			SysMessage("lightrec_init_mmap failed");

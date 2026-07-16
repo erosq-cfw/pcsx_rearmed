@@ -43,6 +43,13 @@
 #include "../mdec.h"
 #include "../cdrom.h"
 
+/* EROSQ Phase 6 (Part A): POSIX shared-memory + mmap for the mirrored METHOD-1
+ * RAM mapping (mipsrec_init_mmap below). */
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+
 /* Standard console logging */
 #define REC_LOG(...) printf("mipsrec: " __VA_ARGS__)
 #ifndef REC_LOG
@@ -97,6 +104,16 @@
  * pcsx4all's psxMemWrite32_CacheCtrlPort mechanism. */
 #define USE_DIRECT_MEM_ACCESS
 
+/* EROSQ Phase 6 (Part A): turn on METHOD-1 virtual RAM mapping. Defining the
+ * mirroring umbrella enables USE_VIRTUAL_PSXMEM_MAPPING (mirrored psxM,
+ * inlined scratchpad, 2-instr address conversion, no same-2MB check). We then
+ * #undef USE_VIRTUAL_RECRAM_MAPPING (Part B — block-dispatch mmap) right after
+ * the block: it touches recRAM/PC_REC and the SMC-invalidation path and is
+ * deliberately deferred. rec_mmap_psx_mem()/rec_mmap_rec_mem() below stay inert;
+ * the real mapping is done in mipsrec_init_mmap(), called from psxMemInit() so
+ * rearmed's memRLUT/memWLUT build against the mapped psxM (correct ordering). */
+#define SHMEM_MIRRORING
+
 /* Virtual memory mapping options: */
 #if defined(SHMEM_MIRRORING) || defined(TMPFS_MIRRORING)
 	/* 2MB of PSX RAM (psxM) is now mapped+mirrored virtually, much like
@@ -126,6 +143,10 @@
 #else
 	#warning "Neither SHMEM_MIRRORING nor TMPFS_MIRRORING are defined! Dynarec will use slower block dispatch loop and emit slower memory accesses. Check your Makefile!"
 #endif // defined(SHMEM_MIRRORING) || defined(TMPFS_MIRRORING)
+
+/* EROSQ Phase 6: Part B (block-dispatch mmap) deferred — keep the LUT dispatch
+ * loops and the review-fixed recClear()/SMC path unchanged. */
+#undef USE_VIRTUAL_RECRAM_MAPPING
 
 //#define WITH_DISASM
 //#define DEBUGG printf
@@ -286,6 +307,87 @@ static uptr block_fast_ret_addr;           /* Non-zero when blocks are using dir
 
 static bool psx_mem_mapped;                /* PS1 RAM mmap'd+mirrored at fixed address? (psxM) */
 static bool rec_mem_mapped;                /* Code ptr arrays mmap'd+mirrored at fixed address? (recRAM,recROM) */
+
+/* EROSQ Phase 6 (Part A): set up the METHOD-1 mirrored RAM mapping and repoint
+ * rearmed's psxM/psxP/psxH/psxR into it. Called from psxMemInit() (via the
+ * MIPSREC_CUSTOM_MAP branch, parallel to lightrec_init_mmap) BEFORE rearmed
+ * builds memRLUT/memWLUT, so the LUTs and the emitted METHOD-1 direct accesses
+ * both address the same physical RAM.
+ *
+ * Layout matches emitAddressConversion()'s host = PSX_MEM_VADDR|(guest&0x0fffffff):
+ *   - 2MB RAM shared-mapped + mirrored 4x at PSX_MEM_VADDR (0x10000000..0x107fffff);
+ *     the TLB folds the PS1's four RAM mirrors, so no address masking is emitted.
+ *   - scratchpad+HW (psxH) fixed at 0x1f800000 so inlined scratchpad stores land
+ *     on the same pages psxMemRead/Write use (only scratchpad is accessed direct;
+ *     HW regs stay indirect via the runtime range check).
+ *   - expansion (psxP) and BIOS (psxR) are indirect-only; plain anonymous maps.
+ * On any failure everything is unwound and -1 returned, so psxMemInit() can fall
+ * back to the plain (METHOD-2) map and the emulator still runs, just slower. */
+extern "C" int mipsrec_init_mmap(void)
+{
+	const char *shm_name = "/mipsrec_psxmem";
+	int   fd = -1;
+	void *ram = MAP_FAILED, *hw = MAP_FAILED, *exp = MAP_FAILED, *bios = MAP_FAILED;
+	int   n_ram_maps = 0;
+
+	if (sysconf(_SC_PAGESIZE) > 65536) {
+		printf("mipsrec_init_mmap: page size > 64KB unsupported\n");
+		return -1;
+	}
+
+	/* Shared backing object for the 2MB RAM + its 3 mirrors. */
+	fd = shm_open(shm_name, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+	if (fd < 0) { perror("mipsrec_init_mmap: shm_open"); goto fail; }
+	if (ftruncate(fd, 0x200000) < 0) { perror("mipsrec_init_mmap: ftruncate"); goto fail; }
+
+	for (n_ram_maps = 0; n_ram_maps < 4; n_ram_maps++) {
+		void *want = (void *)(uintptr_t)(PSX_MEM_VADDR + 0x200000ULL * n_ram_maps);
+		void *got  = mmap(want, 0x200000, PROT_READ | PROT_WRITE,
+		                  MAP_SHARED | MAP_FIXED, fd, 0);
+		if (got == MAP_FAILED || got != want) {
+			printf("mipsrec_init_mmap: RAM mirror %d at %p failed\n", n_ram_maps, want);
+			goto fail;
+		}
+		if (n_ram_maps == 0) ram = got;
+	}
+
+	/* scratchpad + HW I/O region, fixed at 0x1f800000 (METHOD-1 expects it there). */
+	hw = mmap((void *)0x1f800000, 0x10000, PROT_READ | PROT_WRITE,
+	          MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+	if (hw == MAP_FAILED || hw != (void *)0x1f800000) {
+		printf("mipsrec_init_mmap: psxH at 0x1f800000 failed\n"); goto fail;
+	}
+
+	/* Expansion ROM (psxP) — indirect-only, location doesn't matter. */
+	exp = mmap(NULL, 0x10000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (exp == MAP_FAILED) { perror("mipsrec_init_mmap: psxP"); goto fail; }
+
+	/* BIOS (psxR) — indirect-only. */
+	bios = mmap(NULL, 0x80000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (bios == MAP_FAILED) { perror("mipsrec_init_mmap: psxR"); goto fail; }
+
+	shm_unlink(shm_name);   /* backing stays alive while mapped */
+	close(fd);
+
+	psxRegs.ptrs.psxM = (u8 *)ram;
+	psxH = (u8 *)hw;   /* compat.h macro-aliases the member name 'psxH' */
+	psxRegs.ptrs.psxP = (u8 *)exp;
+	psxRegs.ptrs.psxR = (u8 *)bios;
+	psx_mem_mapped = true;
+	printf("mipsrec: PSX RAM mirrored at %p (METHOD-1 fastmem)\n", ram);
+	return 0;
+
+fail:
+	while (n_ram_maps-- > 0)
+		munmap((void *)(uintptr_t)(PSX_MEM_VADDR + 0x200000ULL * n_ram_maps), 0x200000);
+	if (hw   != MAP_FAILED) munmap(hw,   0x10000);
+	if (exp  != MAP_FAILED) munmap(exp,  0x10000);
+	if (bios != MAP_FAILED) munmap(bios, 0x80000);
+	if (fd >= 0) { close(fd); shm_unlink(shm_name); }
+	psx_mem_mapped = false;
+	printf("mipsrec_init_mmap: failed, falling back to non-mirrored map (slower)\n");
+	return -1;
+}
 
 /* Flags used during a recompilation phase */
 static bool branch;                        /* Current instruction lies in a BD slot? */

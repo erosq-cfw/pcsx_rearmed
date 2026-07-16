@@ -213,7 +213,9 @@ else ifeq "$(DYNAREC)" "mipsrec"
 # only define those under DRC_DISABLE); ndrc_g and the new_dynarec_* stubs come
 # from emu_if.c's non-ari64 branch, which we opt into via the !defined(MIPSREC)
 # guards added there (same treatment LIGHTREC gets).
-CFLAGS += -DMIPSREC
+# MIPSREC_CUSTOM_MAP=1: psxmem.c calls mipsrec_init_mmap() (Phase 6 Part A) to
+# mirror PS1 RAM at a fixed vaddr for METHOD-1 fastmem (see recompiler.cpp).
+CFLAGS += -DMIPSREC -DMIPSREC_CUSTOM_MAP=1
 # GO LIVE (Phase 3): the recompiler's dispatch loops and every recompiled block
 # reach C helpers with bare JAL/J (mips_codegen.h) and address locals/tables
 # with absolute lui/%hi+%lo — neither is representable in the toolchain-default
