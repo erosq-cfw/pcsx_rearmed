@@ -59,6 +59,72 @@ static inline uint32_t bgr888_to_rgb565_pair(const uint8_t * __restrict__ src,
 
 /* have bgr555_to_rgb565 somewhere else */
 
+#elif defined(HAVE_bgr555_to_rgb565_mxu)
+
+/* EROSQ X1000 MXU1 path. GCC's generic vector extensions (the branch below)
+ * scalarize on this no-SIMD MIPS core to ~19 insns/pixel; this hand kernel
+ * runs the same bgr555 (a bbbbb ggggg rrrrr) -> rgb565 (rrrrr gggggg bbbbb)
+ * transform at ~3.25 insns/pixel, 4 pixels per iteration across two XR regs.
+ *
+ * Per 16-bit lane, matching the scalar reference exactly:
+ *     s1 = s << 1;  d = (s1 & 0x07c0) | (s << 11) | (s1 >> 11);
+ * i.e. red = s<<11, green = (s<<1)&0x07c0 (LSB left 0, no replication),
+ * blue = (s<<1)>>11. Bit-exact vs the reference (test_cspace_mxu.cpp).
+ *
+ * MXU S32LDD/S32STD move 32 bits (two little-endian pixels) and need 4-byte
+ * alignment. dst is aligned with one leading scalar pixel; src can only be
+ * aligned in lockstep when it shares dst's 2-byte parity, so a differing
+ * parity takes the scalar path for the whole row (rare for these buffers). */
+#include "../plugins/gpu_unai/mxu_x1000.h"
+
+#define BGR555_ONE(dp, sp) do { \
+	unsigned s_ = (sp); \
+	unsigned d_ = (s_ << 1) & 0xffff; \
+	(dp) = (uint16_t)((d_ & 0x07c0) | ((s_ << 11) & 0xffff) | (d_ >> 11)); \
+} while (0)
+
+void bgr555_to_rgb565(void * __restrict__ dst_, const void * __restrict__ src_,
+	int pixels)
+{
+	const uint16_t * __restrict__ src = src_;
+	uint16_t * __restrict__ dst = dst_;
+
+	/* src and dst can only both reach 4-byte alignment if they share parity */
+	if (((uintptr_t)src ^ (uintptr_t)dst) & 3) {
+		for (; pixels > 0; pixels--, src++, dst++)
+			BGR555_ONE(*dst, *src);
+		return;
+	}
+
+	MXU_S32I2M(MXU_XR16, 1);           /* enable MXU ALU (silent-nop otherwise) */
+	MXU_S32I2M(MXU_XR15, 0x07c007c0);  /* green mask, both lanes */
+
+	if (((uintptr_t)dst & 2) && pixels > 0) {   /* one leading pixel -> 4-align */
+		BGR555_ONE(*dst, *src);
+		dst++; src++; pixels--;
+	}
+
+	for (; pixels >= 4; pixels -= 4, src += 4, dst += 4) {
+		MXU_S32LDD(MXU_XR1, src);      /* pixels 0,1 */
+		MXU_S32LDD(MXU_XR2, src + 2);  /* pixels 2,3 */
+		MXU_Q16SLL(MXU_XR3, MXU_XR1, MXU_XR2, MXU_XR4, 1);   /* s1  = s << 1  */
+		MXU_Q16SLL(MXU_XR5, MXU_XR1, MXU_XR2, MXU_XR6, 11);  /* red = s << 11 */
+		MXU_Q16SLR(MXU_XR7, MXU_XR3, MXU_XR4, MXU_XR8, 11);  /* blue= s1 >> 11*/
+		MXU_S32AND(MXU_XR9,  MXU_XR3, MXU_XR15);              /* green (0,1) */
+		MXU_S32AND(MXU_XR10, MXU_XR4, MXU_XR15);              /* green (2,3) */
+		MXU_S32OR(MXU_XR5, MXU_XR5, MXU_XR9);
+		MXU_S32OR(MXU_XR5, MXU_XR5, MXU_XR7);                 /* dst 0,1 */
+		MXU_S32OR(MXU_XR6, MXU_XR6, MXU_XR10);
+		MXU_S32OR(MXU_XR6, MXU_XR6, MXU_XR8);                 /* dst 2,3 */
+		MXU_S32STD(MXU_XR5, dst);
+		MXU_S32STD(MXU_XR6, dst + 2);
+	}
+
+	for (; pixels > 0; pixels--, src++, dst++)
+		BGR555_ONE(*dst, *src);
+}
+#undef BGR555_ONE
+
 #elif ((defined(__clang_major__) && __clang_major__ >= 4) \
         || (defined(__GNUC__) && __GNUC__ >= 5)) \
        && __BYTE_ORDER__ != __ORDER_BIG_ENDIAN__
