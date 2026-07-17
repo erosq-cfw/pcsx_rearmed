@@ -924,7 +924,7 @@ __attribute__((noinline)) void recExecute_indirect_return_lut()
 
 		recFunc((void *)*p);
 
-		if (psxRegs.cycle >= psxRegs.io_cycle_counter)
+		if ((s32)(psxRegs.cycle - psxRegs.io_cycle_counter) >= 0) // wrap-safe (see subu/bgez in asm loop)
 			mipsrec_branch_test();
 	}
 #else
@@ -1001,8 +1001,8 @@ __asm__ __volatile__ (
 
 
 // Must call psxBranchTest() when psxRegs.cycle >= psxRegs.io_cycle_counter
-"sltu  $t4, $t3, $t4                          \n"
-"beqz  $t4, call_psxBranchTest%=              \n"
+"subu  $t4, $t3, $t4                          \n" // wrap-safe horizon: $t4 = (cycle+v1) - next_interupt
+"bgez  $t4, call_psxBranchTest%=              \n" // reached iff (s32)(cycle-next)>=0 (survives u32 cycle wrap)
 "sw    $t3, %[psxRegs_cycle_off]($fp)         \n" // <BD> IMPORTANT: store new psxRegs.cycle val,
                                                   //  whether or not we are branching here
 
@@ -1093,7 +1093,7 @@ __attribute__((noinline)) static void recExecute_indirect_return_mmap()
 
 		recFunc((void *)*p);
 
-		if (psxRegs.cycle >= psxRegs.io_cycle_counter)
+		if ((s32)(psxRegs.cycle - psxRegs.io_cycle_counter) >= 0) // wrap-safe (see subu/bgez in asm loop)
 			mipsrec_branch_test();
 	}
 #else
@@ -1174,8 +1174,8 @@ __asm__ __volatile__ (
 "addu  $t3, $t3, $v1                          \n" // $t3 = psxRegs.cycle + $v1
 
 // Must call psxBranchTest() when psxRegs.cycle >= psxRegs.io_cycle_counter
-"sltu  $t4, $t3, $t4                          \n"
-"beqz  $t4, call_psxBranchTest%=              \n"
+"subu  $t4, $t3, $t4                          \n" // wrap-safe horizon: $t4 = (cycle+v1) - next_interupt
+"bgez  $t4, call_psxBranchTest%=              \n" // reached iff (s32)(cycle-next)>=0 (survives u32 cycle wrap)
 "sw    $t3, %[psxRegs_cycle_off]($fp)         \n" // <BD> IMPORTANT: store new psxRegs.cycle val,
                                                   //  whether or not we are branching here
 
@@ -1344,8 +1344,8 @@ __asm__ __volatile__ (
 
 
 // Must call psxBranchTest() when psxRegs.cycle >= psxRegs.io_cycle_counter
-"sltu  $t4, $t3, $t4                          \n"
-"beqz  $t4, call_psxBranchTest%=              \n"
+"subu  $t4, $t3, $t4                          \n" // wrap-safe horizon: $t4 = (cycle+v1) - next_interupt
+"bgez  $t4, call_psxBranchTest%=              \n" // reached iff (s32)(cycle-next)>=0 (survives u32 cycle wrap)
 "sw    $t3, %[psxRegs_cycle_off]($fp)         \n" // <BD> IMPORTANT: store new psxRegs.cycle val,
                                                   //  whether or not we are branching here
 
@@ -1401,8 +1401,8 @@ __asm__ __volatile__ (
 "addu  $t3, $t3, $v1                          \n" // $t3 = psxRegs.cycle + $v1
 
 // Must call psxBranchTest() when psxRegs.cycle >= psxRegs.io_cycle_counter
-"sltu  $t4, $t3, $t4                          \n"
-"beqz  $t4, call_psxBranchTest_fastpath%=     \n"
+"subu  $t4, $t3, $t4                          \n" // wrap-safe horizon: $t4 = (cycle+v1) - next_interupt
+"bgez  $t4, call_psxBranchTest_fastpath%=     \n" // reached iff (s32)(cycle-next)>=0 (survives u32 cycle wrap)
 "sw    $t3, %[psxRegs_cycle_off]($fp)         \n" // <BD> IMPORTANT: store new psxRegs.cycle val,
                                                   //  whether or not we are branching here
 
@@ -1570,8 +1570,8 @@ __asm__ __volatile__ (
 "addu  $t3, $t3, $v1                          \n" // $t3 = psxRegs.cycle + $v1
 
 // Must call psxBranchTest() when psxRegs.cycle >= psxRegs.io_cycle_counter
-"sltu  $t4, $t3, $t4                          \n"
-"beqz  $t4, call_psxBranchTest%=              \n"
+"subu  $t4, $t3, $t4                          \n" // wrap-safe horizon: $t4 = (cycle+v1) - next_interupt
+"bgez  $t4, call_psxBranchTest%=              \n" // reached iff (s32)(cycle-next)>=0 (survives u32 cycle wrap)
 "sw    $t3, %[psxRegs_cycle_off]($fp)         \n" // <BD> IMPORTANT: store new psxRegs.cycle val,
                                                   //  whether or not we are branching here
 
@@ -1627,8 +1627,8 @@ __asm__ __volatile__ (
 "addu  $t3, $t3, $v1                          \n" // $t3 = psxRegs.cycle + $v1
 
 // Must call psxBranchTest() when psxRegs.cycle >= psxRegs.io_cycle_counter
-"sltu  $t4, $t3, $t4                          \n"
-"beqz  $t4, call_psxBranchTest_fastpath%=     \n"
+"subu  $t4, $t3, $t4                          \n" // wrap-safe horizon: $t4 = (cycle+v1) - next_interupt
+"bgez  $t4, call_psxBranchTest_fastpath%=     \n" // reached iff (s32)(cycle-next)>=0 (survives u32 cycle wrap)
 "sw    $t3, %[psxRegs_cycle_off]($fp)         \n" // <BD> IMPORTANT: store new psxRegs.cycle val,
                                                   //  whether or not we are branching here
 
@@ -1712,7 +1712,7 @@ __attribute__((noinline)) static void recExecuteBlock(unsigned target_pc)
 
 		recFunc((void *)*p);
 
-		if (psxRegs.cycle >= psxRegs.io_cycle_counter)
+		if ((s32)(psxRegs.cycle - psxRegs.io_cycle_counter) >= 0) // wrap-safe (see subu/bgez in asm loop)
 			mipsrec_branch_test();
 	} while (psxRegs.pc != target_pc);
 #else
@@ -1793,8 +1793,8 @@ __asm__ __volatile__ (
                                                   //  block, or is 0 if block needs compiling
 
 // Must call psxBranchTest() when psxRegs.cycle >= psxRegs.io_cycle_counter
-"sltu  $t4, $t3, $t4                          \n"
-"beqz  $t4, call_psxBranchTest%=              \n"
+"subu  $t4, $t3, $t4                          \n" // wrap-safe horizon: $t4 = (cycle+v1) - next_interupt
+"bgez  $t4, call_psxBranchTest%=              \n" // reached iff (s32)(cycle-next)>=0 (survives u32 cycle wrap)
 "sw    $t3, %[psxRegs_cycle_off]($fp)         \n" // <BD> IMPORTANT: store new psxRegs.cycle val,
                                                   //  whether or not we are branching here
 

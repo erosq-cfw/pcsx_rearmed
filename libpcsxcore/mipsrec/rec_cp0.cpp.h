@@ -164,9 +164,13 @@ static void recRFE()
 
 	LW(TEMP_1, PERM_REG_1, offCP0(12));
 
-	// Reset psxRegs.io_cycle_counter, so that psxBranchTest() is called as
-	//  soon as possible to handle any pending interrupts/events
-	SW(0, PERM_REG_1, off(io_cycle_counter));
+	// Force psxBranchTest() as soon as possible to handle pending interrupts/
+	//  events. The horizon test is wrap-safe signed-diff (s32)(cycle-next)>=0,
+	//  so set next_interupt = cycle (delta 0 -> "reached") rather than 0, which
+	//  reads as "not reached" once cycle >= 0x80000000 and would stall IRQs for
+	//  up to a full ~127s cycle-counter wrap.
+	LW(TEMP_2, PERM_REG_1, off(cycle));
+	SW(TEMP_2, PERM_REG_1, off(io_cycle_counter));
 
 #ifdef HAVE_MIPS32R2_EXT_INS
 	EXT(TEMP_2, TEMP_1, 2, 4);   // Copy bits 5:2 of TEMP_1 to 3:0 of TEMP_2
