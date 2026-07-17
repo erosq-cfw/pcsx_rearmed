@@ -478,6 +478,12 @@ static noinline void gpuSpriteDriverFn(le16_t *pPixel, u32 count, const u8 *pTxt
 	  u32 count1 = count;
 	  do
 	  {
+#if defined(__mips__) && defined(GPU_UNAI_USE_MXU)
+		/* hi-res column skip: present never samples this column */
+		if (unlikely(pskip_mask2) &&
+		    ((pskip_mask2 >> (((uintptr_t)pDst >> 1) & 7)) & 1))
+			goto endsprite;
+#endif
 		if (CF_MASKCHECK || CF_BLEND) { uDst = le16_to_u16(*pDst); }
 		if (CF_MASKCHECK) if (uDst&0x8000) { goto endsprite; }
 
@@ -758,8 +764,16 @@ endpolynotextgou:
 			}
 		}
 
+#if defined(__mips__) && defined(GPU_UNAI_USE_MXU)
+		const u32 l_bm2 = pskip_mask2;
+#endif
 		do
 		{
+#if defined(__mips__) && defined(GPU_UNAI_USE_MXU)
+			/* hi-res column skip: present never samples this column */
+			if (unlikely(l_bm2) && ((l_bm2 >> (((uintptr_t)pDst >> 1) & 7)) & 1))
+				goto endpolytext;
+#endif
 			if (CF_MASKCHECK || CF_BLEND) { uDst = le16_to_u16(*pDst); }
 			if (CF_MASKCHECK) if (uDst&0x8000) { goto endpolytext; }
 

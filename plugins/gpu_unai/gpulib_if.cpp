@@ -93,6 +93,8 @@ static void mxu_spans_init(void)
 {
   const char *e = getenv("EROSQ_MXU");
   mxu_spans_on = (e == NULL) || (atoi(e) != 0);
+  e = getenv("EROSQ_PSKIP");
+  pskip_on = (e == NULL) || (atoi(e) != 0);
   e = getenv("EROSQ_GPU_HIST");
   if (e && atoi(e)) {
     gpu_hist_on = 1;
@@ -162,6 +164,22 @@ void renderer_notify_screen_change(const struct psx_gpu_screen *screen)
   {
     gpu_unai.inn.ilace_mask |= !!(gpu.status & PSX_GPU_STATUS_INTERLACE);
   }
+
+#if defined(__mips__) && defined(GPU_UNAI_USE_MXU)
+  /* Hi-res horizontal pixel-skip (pcsx4all blit_mask lineage): the panel is
+   * 320 wide and plat_erosq present_scaled samples column x*hres/320, so in
+   * 512-wide modes only VRAM columns {0,1,3,4,6} of every 8 are ever shown
+   * (skip mask 0xa4; 640-wide: every other column, 0xaa). Textured kernels
+   * skip fetching/writing the dead columns — displayed image is identical.
+   * Mask phase is (vram_column & 7), so require an 8-aligned display start;
+   * games reading VRAM back for fb effects can kill it via EROSQ_PSKIP=0. */
+  u32 m = 0;
+  if (pskip_on && !(screen->src_x & 7)) {
+    if (screen->hres == 512)      m = 0xa4;
+    else if (screen->hres == 640) m = 0xaa;
+  }
+  pskip_mask2 = m | (m << 8);
+#endif
 
   /*
   printf("res change hres: %d   vres: %d   depth: %d   ilace_mask: %d\n",

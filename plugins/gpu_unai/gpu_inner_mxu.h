@@ -28,6 +28,14 @@
 #include "gpu_blend_swar.h"
 
 static int mxu_spans_on = 1;      /* EROSQ_MXU=0 disables at runtime (A/B) */
+static int pskip_on = 1;          /* EROSQ_PSKIP=0 disables at runtime (A/B) */
+/* Hi-res horizontal column-skip mask (pcsx4all "blit_mask" lineage). Nonzero
+ * only in 512/640-wide modes: bit (vram_column & 7) set = present_scaled's
+ * nearest-neighbour xmap (x*hres/320) never samples that column, so textured
+ * span/sprite kernels skip its texel fetch and store. Displayed output stays
+ * pixel-identical for drawn prims; only VRAM columns nothing reads differ.
+ * Doubled to 16 bits so a lane-1 lookup at phase 7 reads bit 8, not garbage. */
+static u32 pskip_mask2 = 0;
 static int gpu_hist_on = 0;       /* EROSQ_GPU_HIST=1 + SIGUSR1 dumps */
 static unsigned long long gpu_hist_span[1024], gpu_hist_px[1024];
 /* sprites/tiles were invisible to the poly-span histogram (their pixels are
@@ -393,10 +401,17 @@ static void poly_mxu_tx_lit(const gpu_unai_t &gpu_unai, le16_t *pDst, u32 count)
 		MXU_S32I2M(MXU_XR9, (b5 << 16) | b5);
 	}
 
+	const u32 bm2 = pskip_mask2;
 	while (count >= 2) {
-		uint_fast16_t t0 = mxu_fetch_texel<TM>(l_u, l_v, mask_v00u, TBA_, CBA_);
+		uint_fast16_t t0 = 0, t1 = 0;
+		/* hi-res column skip: never fetch a column present won't sample;
+		 * lane stays 0 so the existing t0/t1 store guards suppress it */
+		u32 sk = unlikely(bm2) ? (bm2 >> (((uintptr_t)pDst >> 1) & 7)) : 0;
+		if (!(sk & 1))
+			t0 = mxu_fetch_texel<TM>(l_u, l_v, mask_v00u, TBA_, CBA_);
 		l_u += l_u_inc; l_v += l_v_inc;
-		uint_fast16_t t1 = mxu_fetch_texel<TM>(l_u, l_v, mask_v00u, TBA_, CBA_);
+		if (!(sk & 2))
+			t1 = mxu_fetch_texel<TM>(l_u, l_v, mask_v00u, TBA_, CBA_);
 		l_u += l_u_inc; l_v += l_v_inc;
 
 		if (GOU) {
@@ -426,6 +441,8 @@ static void poly_mxu_tx_lit(const gpu_unai_t &gpu_unai, le16_t *pDst, u32 count)
 		count -= 2;
 	}
 	if (count) { /* odd tail, scalar via LightLUT (bit-identical) */
+		if (unlikely(bm2) && ((bm2 >> (((uintptr_t)pDst >> 1) & 7)) & 1))
+			return;
 		uint_fast16_t t = mxu_fetch_texel<TM>(l_u, l_v, mask_v00u, TBA_, CBA_);
 		if (t) {
 			u32 lr, lg, lb;
