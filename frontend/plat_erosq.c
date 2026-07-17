@@ -113,6 +113,7 @@ static void *menu_fb;        /* 320x240 menu draw target (g_menuscreen_ptr) */
 static uint16_t *drm_buf;    /* mapped 320x240 RGB565 scanout */
 static int drm_stride;       /* scanout row stride in pixels */
 static int psx_w = 320, psx_h = 240;
+static int g_direct;         /* present fusion: frontend renders straight into drm_buf */
 
 /* ponytail: SIGUSR1 -> dump current PSX frame (shadow_fb, RGB565) as a PPM so
  * headless perf runs can SEE the game state. Debug tool; flag set in handler,
@@ -332,22 +333,36 @@ void *plat_gvideo_set_mode(int *w, int *h, int *bpp)
 {
 	psx_w = *w;
 	psx_h = *h;
-	/* frontend renders RGB565 into shadow_fb (pl_plat_* stay NULL); we scale on flip */
-	return shadow_fb;
+	/* Present fusion: when the emulator's output already matches the panel
+	 * (every NTSC 320x240 game, and every hi-res game once scale_hires's
+	 * downscale blit reduces it to 320-wide), hand the frontend drm_buf so its
+	 * (already fully-correct: bgr24, hi-res, wrap, HUD) blit lands straight in
+	 * the scanout — deleting the shadow_fb round-trip and the scale-copy pass.
+	 * Needs an unpadded 320-wide scanout so the frontend's dstride(=pl_vout_w=
+	 * PANEL_W) equals drm_stride. Other modes (PAL 256h, non-scale_hires
+	 * hi-res) keep the proven scale-on-flip path via shadow_fb. */
+	g_direct = (*w == PANEL_W && *h == PANEL_H && drm_stride == PANEL_W);
+	return g_direct ? (void *)drm_buf : shadow_fb;
 }
 
 void *plat_gvideo_flip(void)
 {
-	present_scaled(shadow_fb, psx_w, psx_h);
-	if (g_want_shot) { g_want_shot = 0; dump_ppm(shadow_fb, psx_w, psx_h); }
+	void *frame = g_direct ? (void *)drm_buf : shadow_fb;
+	if (g_direct)
+		drm_present();               /* frame is already in the scanout */
+	else
+		present_scaled(shadow_fb, psx_w, psx_h);
+	if (g_want_shot) { g_want_shot = 0;
+		dump_ppm(frame, g_direct ? PANEL_W : psx_w, g_direct ? PANEL_H : psx_h); }
 	if (g_want_smpdump) { g_want_smpdump = 0; smp_dump(); }
 	/* EROSQ_VID_LOG=1: confirm the frame path is live without a human watching */
 	if (getenv("EROSQ_VID_LOG")) {
 		static unsigned long n;
 		if ((++n % 60) == 0)
-			fprintf(stderr, "[vid] flip %lu  psx=%dx%d\n", n, psx_w, psx_h);
+			fprintf(stderr, "[vid] flip %lu  psx=%dx%d%s\n", n, psx_w, psx_h,
+				g_direct ? " direct" : "");
 	}
-	return shadow_fb;
+	return frame;
 }
 
 void plat_gvideo_close(void)
@@ -380,9 +395,14 @@ void plat_video_menu_leave(void)
 
 void *plat_prepare_screenshot(int *w, int *h, int *bpp)
 {
+	*bpp = 16;
+	if (g_direct) {   /* live frame is the scanout, not shadow_fb */
+		*w = PANEL_W;
+		*h = PANEL_H;
+		return drm_buf;
+	}
 	*w = psx_w;
 	*h = psx_h;
-	*bpp = 16;
 	return shadow_fb;
 }
 
