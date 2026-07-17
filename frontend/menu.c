@@ -110,7 +110,10 @@ static char last_selected_fname[MAXPATHLEN];
 static int config_save_counter, region, in_type_sel1, in_type_sel2;
 static int psx_clock;
 static int memcard1_sel = -1, memcard2_sel = -1;
-static int cd_buf_count;
+/* erosq: default the CD read-ahead ON (100 sectors, ~245KB). Sync CHD reads
+ * off SD spike to 47-188ms and underrun XA audio (PaRappa stutter); the
+ * prefetch thread hides that latency. pcsx.cfg cd_buf_count overrides. */
+static int cd_buf_count = 100;
 extern int g_autostateld_opt;
 static int menu_iopts[9];
 int g_opts, g_scaler, g_gamma = 100;

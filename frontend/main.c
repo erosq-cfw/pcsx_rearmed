@@ -144,6 +144,13 @@ void emu_set_default_config(void)
 	spu_config.iXAPitch = 0;
 	spu_config.iVolume = 768;
 	spu_config.iTempo = 0;
+#ifdef EROSQ
+	/* self-heal the ALSA buffer after emu-thread stalls (SD/CHD read spikes):
+	 * regenerate samples whenever the buffer drops below half. Without this,
+	 * one stall leaves the buffer near-empty forever and every later hiccup
+	 * underruns again (PaRappa XA-audio stutter). Engages only on under-fill. */
+	spu_config.iTempo = 1;
+#endif
 	// may cause issues, no effect if only 1 core is detected
 	spu_config.iUseThread = 0;
 #if defined(HAVE_PRE_ARMV7) && !defined(_3DS) /* XXX GPH hack */

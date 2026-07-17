@@ -26,6 +26,7 @@
 
 #include <assert.h>
 #include <errno.h>
+#include <time.h>
 #include <zlib.h>
 #ifdef HAVE_CHD
 #include <libchdr/chd.h>
@@ -1688,9 +1689,13 @@ static void DecodeRawSubData(unsigned char *subbuffer) {
 // read track
 // time: byte 0 - minute; byte 1 - second; byte 2 - frame (non-bcd)
 // buf: if NULL, data is kept in internal buffer accessible by ISOgetBuffer()
+/* ponytail: EROSQ_ADBG=1 -> time every CD sector read, print slow ones.
+ * Diagnostic for the PaRappa audio-stutter hunt; strip when done. */
+static int cd_adbg = -1;
 int ISOreadTrack(const unsigned char *time, void *buf)
 {
 	int sector = msf2sec(time);
+	struct timespec t0, t1;
 	long ret;
 
 	if (!cdHandle && !chd_img)
@@ -1703,7 +1708,17 @@ int ISOreadTrack(const unsigned char *time, void *buf)
 
 	sector -= 2 * 75;
 
+	if (cd_adbg < 0) cd_adbg = getenv("EROSQ_ADBG") ? 1 : 0;
+	if (cd_adbg) clock_gettime(CLOCK_MONOTONIC, &t0);
 	ret = cdimg_read_func(cdHandle, 0, buf, sector);
+	if (cd_adbg) {
+		long us;
+		clock_gettime(CLOCK_MONOTONIC, &t1);
+		us = (t1.tv_sec - t0.tv_sec) * 1000000L + (t1.tv_nsec - t0.tv_nsec) / 1000L;
+		if (us > 10000)
+			fprintf(stderr, "ADBG cdread sector=%d took %ldus at %ld.%03lds\n",
+				sector, us, (long)t1.tv_sec, t1.tv_nsec / 1000000L);
+	}
 	if (ret < 12*2 + 2048)
 		return -1;
 

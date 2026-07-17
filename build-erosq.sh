@@ -18,6 +18,10 @@ if [ "$1" = "conf" ] || [ ! -f config.mak ]; then
 	./configure --platform=erosq --gpu=unai --dynarec=lightrec
 fi
 
-make -j"$(nproc)" 2>&1
+# USE_ASYNC_CDROM: CD prefetch thread hides SD/CHD read latency (47-188ms
+# spikes stalled the emu thread and underran XA audio in PaRappa). Other
+# async options stay off (single-core X1000). NOTE: if you toggle this flag,
+# purge libpcsxcore/cdrom-async.o frontend/menu.o frontend/main.o first.
+make -j"$(nproc)" USE_ASYNC_CDROM=1 2>&1
 echo "=== BUILD RESULT ==="
 ls -la pcsx 2>/dev/null && file pcsx

@@ -44,10 +44,9 @@ unsigned long long prof_now_ns(void)
 	return (unsigned long long)t.tv_sec * 1000000000ull + t.tv_nsec;
 }
 
-/* Normally defined by frontend/pcsxr-threads.c (built only with USE_RTHREADS).
- * We build single-threaded (single-core X1000, 32MB RAM), so define it here as
- * 1 core -> the "SPU multithreading" menu option stays disabled. */
-int pcsxr_sthread_core_count = 1;
+/* pcsxr_sthread_core_count now comes from frontend/pcsxr-threads.c: we build
+ * with USE_ASYNC_CDROM=1 (CD prefetch thread hides SD/CHD read latency that
+ * caused PaRappa XA-audio underruns); other async options stay off. */
 
 /* --- input -------------------------------------------------------------- */
 /* Only ~6 keys + a scroll wheel exist on the device (x1000-erosq gpio-keys),
