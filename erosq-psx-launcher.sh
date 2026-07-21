@@ -2,12 +2,15 @@
 # erosq-ui Extras->Games launcher for pcsx_rearmed (Milestone 3).
 # ui_launch_run() invokes this with NO args: it drops DRM master, fork/execs us,
 # waitpids, then reclaims master + force-modesets on our exit. So we must NOT
-# stop erosq-ui here (unlike the ssh dev launcher) -- just free the PCM device
-# (stop mpd), run pcsx (its own disc browser + in-game menu handle selection and
-# savestates), then restore mpd. Binary + this wrapper live on writable SD, so
-# they update without a rootfs reflash; only the extras.tsv row ships in rootfs.
+# stop erosq-ui here (unlike the ssh dev launcher) -- just free the PCM device +
+# RAM by killing mpd (a live mpd keeps swap pages, starving pcsx -> OOM hang), run
+# pcsx (its own disc browser + in-game menu handle selection and savestates), then
+# relaunch mpd, which resumes the queue+position itself via state_file (mpd.conf).
+# We must NOT `mpc stop` first: that would persist state=stop and kill the resume.
+# Binary + this wrapper live on writable SD, so they update without a rootfs
+# reflash; only the extras.tsv row ships in rootfs.
 was_up=; pidof mpd >/dev/null 2>&1 && was_up=1
-[ "$was_up" ] && { mpc stop 2>/dev/null; killall mpd 2>/dev/null; sleep 1; }
+[ "$was_up" ] && { killall mpd 2>/dev/null; sleep 1; }
 cd /media/sd/psx || exit 1
 rm -rf bios                                    # force BiosDir -> ./.pcsx/bios
 mkdir -p .pcsx/bios .pcsx/memcards
