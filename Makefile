@@ -14,6 +14,20 @@ endif
 CFLAGS_OPT ?= -Ofast
 ifneq ($(DEBUG), 1)
 CFLAGS += $(CFLAGS_OPT)
+
+# ponytail: GPU-only PGO. gpu_unai/gpulib rasterize in normal C context (not
+# JIT-reachable) so they can be gcov-instrumented under the real dynarec with
+# no SIGBUS. GPU_PGO_OBJS = the rasterizer TUs. GEN builds the profiler (add
+# libgcov at link); USE applies the merged profile. Inert unless var is set.
+GPU_PGO_OBJS = plugins/gpu_unai/gpulib_if.o plugins/gpu_unai/old/if.o \
+               plugins/gpulib/gpu.o plugins/gpulib/prim.o plugins/gpulib/vout_pl.o
+ifdef GPU_PGO_GEN
+$(GPU_PGO_OBJS): CFLAGS += -fprofile-generate=$(GPU_PGO_GEN) -fno-profile-values
+LDFLAGS += -fprofile-generate=$(GPU_PGO_GEN)
+endif
+ifdef GPU_PGO_USE
+$(GPU_PGO_OBJS): CFLAGS += -fprofile-use=$(GPU_PGO_USE) -fprofile-partial-training -fprofile-correction -Wno-error=coverage-mismatch -Wno-coverage-mismatch
+endif
 ifneq ($(ASSERTS), 1)
 CFLAGS += -DNDEBUG
 endif

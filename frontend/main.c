@@ -809,6 +809,11 @@ static void toggle_fast_forward(int force_off)
 
 static void SignalExit(int sig) {
 	SysPrintf("got signal %d\n", sig);
+#ifdef EROSQ_GCOV_DUMP
+	/* ponytail: PGO profiling — _exit() bypasses libgcov's atexit flush, so
+	 * dump counters explicitly before dying. Inert unless built with -D. */
+	{ extern void __gcov_dump(void); __gcov_dump(); }
+#endif
 	// only to restore framebuffer/resolution on some devices
 	plat_finish();
 	_exit(1);

@@ -37,3 +37,13 @@ psx_gpu_offsets_update
 /erosq_lr_probe
 /erosq_lr_probe_nopic
 /evinject
+
+# erosq PGO profile data + rollback binary copies (build artifacts)
+/prof/
+/pgo-profile/
+/pcsx.lightrec
+/pcsx.mipsrec
+/pcsx.mipsrec.fastmem
+/pcsx.stopfix
+/pcsx.pre-*
+*.gcda

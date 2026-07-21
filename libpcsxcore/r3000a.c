@@ -45,6 +45,10 @@ int psxInit() {
 	assert(PSXINT_COUNT <= ARRAY_SIZE(psxRegs.intCycle));
 	assert(ARRAY_SIZE(psxRegs.intCycle) == ARRAY_SIZE(psxRegs.event_cycles));
 
+	/* ponytail: PGO profiling only — force interpreter so the fixed-VA mirror
+	 * map is unnecessary (see EROSQ_NOMIRROR). Inert unless env is set. */
+	if (getenv("EROSQ_FORCE_INTERP")) Config.Cpu = CPU_INTERPRETER;
+
 #ifndef DRC_DISABLE
 	if (Config.Cpu == CPU_INTERPRETER) {
 		psxCpu = &psxInt;

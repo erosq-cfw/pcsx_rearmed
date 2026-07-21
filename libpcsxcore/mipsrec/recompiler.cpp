@@ -399,6 +399,11 @@ extern "C" int mipsrec_init_mmap(void)
 {
 	const char *shm_name = "/mipsrec_psxmem";
 	int   fd = -1;
+
+	/* ponytail: PGO profiling only — skip the fixed-VA MAP_FIXED mirror map
+	 * (collides with libgcov's runtime), fall back to plain METHOD-2 map. */
+	if (getenv("EROSQ_NOMIRROR")) return -1;
+
 	void *ram = MAP_FAILED, *hw = MAP_FAILED, *exp = MAP_FAILED, *bios = MAP_FAILED;
 	int   n_ram_maps = 0;
 
