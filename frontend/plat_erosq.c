@@ -236,6 +236,28 @@ static void present_scaled(const uint16_t *src, int sw, int sh)
 		/* drm_buf is an uncached dumb-buffer scanout: 16-bit stores cost a
 		 * full bus cycle each. Pack two output pixels into one 32-bit store
 		 * to halve write transactions (PANEL_W is even). */
+		if (sw == 512 && PANEL_W == 320) {
+			/* ponytail: the overwhelmingly common hi-res case (Crash et al).
+			 * 512->320 is a fixed 8:5 ratio, so xmap[10k+j] == 16k+off[j] with
+			 * off={0,1,3,4,6,8,9,11,12,14} (verified bit-identical to x*512/320
+			 * for all 320 cols). Hardcoding the offsets kills the xmap[x] load
+			 * that feeds the gather address — on this load-use-stall core that
+			 * load->load dependency is the inner-loop cost. Output is identical
+			 * to the general path below. 32 groups of 10-out/16-in tile exactly. */
+			for (y = 0; y < PANEL_H; y++) {
+				const uint16_t *s = src + (size_t)ymap[y] * sw;
+				uint32_t *d32 = (uint32_t *)(drm_buf + (size_t)y * drm_stride);
+				int g;
+				for (g = 0; g < PANEL_W / 10; g++) {
+					d32[0] = (uint32_t)s[0]  | ((uint32_t)s[1]  << 16);
+					d32[1] = (uint32_t)s[3]  | ((uint32_t)s[4]  << 16);
+					d32[2] = (uint32_t)s[6]  | ((uint32_t)s[8]  << 16);
+					d32[3] = (uint32_t)s[9]  | ((uint32_t)s[11] << 16);
+					d32[4] = (uint32_t)s[12] | ((uint32_t)s[14] << 16);
+					d32 += 5; s += 16;
+				}
+			}
+		} else
 		for (y = 0; y < PANEL_H; y++) {
 			const uint16_t *s = src + (size_t)ymap[y] * sw;
 			uint32_t *d32 = (uint32_t *)(drm_buf + (size_t)y * drm_stride);
