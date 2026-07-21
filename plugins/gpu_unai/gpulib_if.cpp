@@ -166,19 +166,33 @@ void renderer_notify_screen_change(const struct psx_gpu_screen *screen)
   }
 
 #if defined(__mips__) && defined(GPU_UNAI_USE_MXU)
-  /* Hi-res horizontal pixel-skip (pcsx4all blit_mask lineage): the panel is
-   * 320 wide and plat_erosq present_scaled samples column x*hres/320, so in
-   * 512-wide modes only VRAM columns {0,1,3,4,6} of every 8 are ever shown
-   * (skip mask 0xa4; 640-wide: every other column, 0xaa). Textured kernels
-   * skip fetching/writing the dead columns — displayed image is identical.
-   * Mask phase is (vram_column & 7), so require an 8-aligned display start;
+  /* Hi-res horizontal pixel-skip (pcsx4all blit_mask lineage): the 320-wide
+   * panel shows only 5 of every 8 source columns in 512 mode, so textured
+   * kernels skip fetching/writing the 3 dropped columns (output identical).
+   * The skip mask MUST equal the set of columns the ACTIVE downscaler drops —
+   * skipping a column the downscaler READS leaves it stale => period-5
+   * vertical stripes (this garbaged every hi-res game's detailed scenes under
+   * the default scale_hires, e.g. Spyro's 512-wide intro). Which 3 drop
+   * depends on the downscaler, and 512->320 (8:5) is the ambiguous case:
+   *   - scale_hires ON  (default): cspace bgr555_to_rgb565_512_to_320 samples
+   *     the center-nearest set {0,2,4,5,7}/8, dropping {1,3,6}  -> skip 0x4a.
+   *   - scale_hires OFF: plat present_scaled samples floor(x*8/5)={0,1,3,4,6},
+   *     dropping {2,5,7}                                        -> skip 0xa4.
+   * gpu.state.downscale_enable mirrors scale_hires (gpu.c). 640 mode is a
+   * clean 2:1 — both samplers take the even columns, so skip odds 0xaa either
+   * way. Mask phase is (vram_column & 7): require an 8-aligned display start;
    * games reading VRAM back for fb effects can kill it via EROSQ_PSKIP=0. */
   u32 m = 0;
   if (pskip_on && !(screen->src_x & 7)) {
-    if (screen->hres == 512)      m = 0xa4;
+    if (screen->hres == 512)      m = gpu.state.downscale_enable ? 0x4a : 0xa4;
     else if (screen->hres == 640) m = 0xaa;
   }
   pskip_mask2 = m | (m << 8);
+  if (getenv("EROSQ_VID_LOG"))
+    fprintf(stderr, "[gpu] screen hres=%d vres=%d src_x=%d rgb24=%d dscale=%d pskip=%d mask=0x%02x\n",
+      screen->hres, screen->vres, screen->src_x,
+      (gpu.status & PSX_GPU_STATUS_RGB24) ? 1 : 0,
+      gpu.state.downscale_enable, pskip_on, m);
 #endif
 
   /*
