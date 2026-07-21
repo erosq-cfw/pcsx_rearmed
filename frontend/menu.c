@@ -1546,8 +1546,31 @@ static const char h_spu_volboost[]  = "Large values cause distortion";
 static const char h_spu_tempo[]     = "Slows down audio if emu is too slow\n"
 				      "This is inaccurate and breaks games";
 
+#ifdef EROSQ
+/* DAC hardware volume, defined in plat_erosq.c (tinyalsa "Playback Volume").
+ * Distinct from "Volume boost" above, which is SPU emulation gain — this is the
+ * physical output level erosq-ui normally owns. Seeded live on menu-open and
+ * applied on each slider tick via me_loop_d's draw_prep. Not persisted: the DAC
+ * register is the source of truth. Mirrors picoarch's slider. */
+int erosq_vol_get(void);
+void erosq_vol_set(int pct);
+static int hw_volume;
+static int hw_volume_applied;
+static const char h_hw_volume[] = "Headphone/line-out volume (DAC hardware)";
+static void menu_spu_prep(void)
+{
+	if (hw_volume != hw_volume_applied) {
+		erosq_vol_set(hw_volume);
+		hw_volume_applied = hw_volume;
+	}
+}
+#endif
+
 static menu_entry e_menu_plugin_spu[] =
 {
+#ifdef EROSQ
+	mee_range_h   ("Volume",                    0, hw_volume, 0, 100, h_hw_volume),
+#endif
 	mee_range_h   ("Volume boost",              0, volume_boost, -5, 30, h_spu_volboost),
 	mee_onoff     ("Reverb",                    0, spu_config.iUseReverb, 1),
 	mee_enum      ("Interpolation",             0, spu_config.iUseInterpolation, men_spu_interp),
@@ -1559,7 +1582,14 @@ static menu_entry e_menu_plugin_spu[] =
 static int menu_loop_plugin_spu(int id, int keys)
 {
 	static int sel = 0;
+#ifdef EROSQ
+	int v = erosq_vol_get();
+	if (v >= 0)
+		hw_volume = hw_volume_applied = v;
+	me_loop_d(e_menu_plugin_spu, &sel, menu_spu_prep, NULL);
+#else
 	me_loop(e_menu_plugin_spu, &sel);
+#endif
 	return 0;
 }
 

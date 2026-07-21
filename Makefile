@@ -467,6 +467,7 @@ OBJS += frontend/libpicofe/plat_dummy.o        # provides struct plat_target
 OBJS += frontend/libpicofe/linux/in_evdev.o    # evdev input
 OBJS += frontend/plat_erosq.o frontend/drm_out.o
 frontend/main.o frontend/plugin_lib.o frontend/menu.o: CFLAGS += -DEROSQ
+LDLIBS += -ltinyalsa   # DAC hardware volume slider (plat_erosq erosq_vol_*)
 plugins/gpu_unai/gpulib_if.o: CFLAGS += -DGPU_UNAI_USE_MXU
 # X1000 MXU1 bgr555->rgb565 blit (~5x vs the scalarized generic-vector path);
 # 20% of native core time, every scene. Host diff-tested (test_cspace_mxu.cpp).
