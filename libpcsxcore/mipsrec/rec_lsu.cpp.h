@@ -125,7 +125,15 @@ static const u8 lsu_tmp_cache_reg_pool[LSU_TMP_CACHE_SIZE] =
 
 enum {
 	LSU_TMP_CACHE_USE_TYPE_INVALID,
-	LSU_TMP_CACHE_USE_TYPE_CONST
+	LSU_TMP_CACHE_USE_TYPE_CONST,
+	/* host_reg holds PSX_MEM_VADDR | (guest_reg & 0x0fffffff), i.e. the
+	 * METHOD-1 converted address of guest base reg # 'constval'. Entries
+	 * are invalidated when that guest reg is written (regMipsChanged ->
+	 * lsu_note_guest_reg_write) and, like all entries, on JAL and at
+	 * block boundaries. Compiler-scheduled code constantly breaks up
+	 * load/store series, so re-deriving the conversion per series cost
+	 * 2 insns each time — this makes repeat series on the same base free. */
+	LSU_TMP_CACHE_USE_TYPE_CONVADDR
 };
 
 struct lsu_tmp_cache_entry_t {
@@ -154,6 +162,7 @@ LSU_tmp_cache_get_reg(const int use_type, const u32 constval, u32 unused_param)
 	switch (use_type)
 	{
 		case LSU_TMP_CACHE_USE_TYPE_CONST:
+		case LSU_TMP_CACHE_USE_TYPE_CONVADDR:
 			{
 				for (int i=0; i < LSU_TMP_CACHE_SIZE; ++i) {
 					if (lsu_tmp_cache[i].use_type == use_type &&
@@ -195,6 +204,25 @@ LSU_tmp_cache_get_reg(const int use_type, const u32 constval, u32 unused_param)
 }
 
 #endif // USE_LSU_CACHING
+
+/* Called from regMipsChanged() (regcache.h) whenever a guest reg is written:
+ * any cached converted address derived from that reg is now stale. */
+static void lsu_note_guest_reg_write(u32 regpsx)
+{
+#ifdef USE_LSU_CACHING
+	if (!lsu_tmp_cache_valid)
+		return;
+	for (int i = 0; i < LSU_TMP_CACHE_SIZE; ++i) {
+		if (lsu_tmp_cache[i].use_type == LSU_TMP_CACHE_USE_TYPE_CONVADDR &&
+		    lsu_tmp_cache[i].constval == regpsx) {
+			lsu_tmp_cache[i].use_type = LSU_TMP_CACHE_USE_TYPE_INVALID;
+			lsu_tmp_cache[i].age = 0;
+		}
+	}
+#else
+	(void)regpsx;
+#endif
+}
 /*************************
  * LSU reg caching (end) *
  *************************/
@@ -243,7 +271,8 @@ static u32 emitConstBaseRegLUI(const u16 adr_hi)
 static u32 emitAddressConversion(const u32 op_rs,
                                  const u32 rs,
                                  const u32 desired_reg,
-                                 const u32 tmp_reg)
+                                 const u32 tmp_reg,
+                                 const bool cacheable)
 {
 	if (psx_mem_mapped)
 	{
@@ -265,6 +294,28 @@ static u32 emitAddressConversion(const u32 op_rs,
 	#endif
 
 #else
+
+	#if defined(USE_LSU_CACHING) && defined(HAVE_MIPS32R2_EXT_INS)
+		//  Cache the converted address in the $at/$v1 pool keyed on the GUEST
+		// base reg: repeat series on the same base (broken up by interleaved
+		// ALU ops, the common compiler-scheduled shape) then cost 0 insns
+		// instead of LUI+INS each. Only when 'cacheable' — for dual-path
+		// series the conversion executes conditionally (after the range-check
+		// branch), so its result can't be assumed live at compile time; those
+		// also rely on our at-least-one-insn BD-slot promise, which a cache
+		// hit would break.
+		if (cacheable) {
+			lsu_tmp_cache_entry_t *entry = LSU_tmp_cache_get_reg(
+				LSU_TMP_CACHE_USE_TYPE_CONVADDR, op_rs, 0);
+			if (entry->use_type != LSU_TMP_CACHE_USE_TYPE_INVALID)
+				return entry->host_reg;   // hit: address already live
+			entry->use_type = LSU_TMP_CACHE_USE_TYPE_CONVADDR;
+			entry->constval = op_rs;
+			LUI(entry->host_reg, (PSX_MEM_VADDR >> 16));
+			INS(entry->host_reg, rs, 0, 28);
+			return entry->host_reg;
+		}
+	#endif
 
 		LUI(desired_reg, (PSX_MEM_VADDR >> 16));
 	#ifdef HAVE_MIPS32R2_EXT_INS
@@ -795,7 +846,9 @@ static void general_loads_stores(const int  count,
 		//  TEMP_1 will hold converted base reg, TEMP_2 is overwritten temp reg.
 		//  However, in the future, emitAddressConversion() might return a
 		//  different reg, if caching of converted addresses is ever implemented.
-		const u32 converted_base_reg = emitAddressConversion(op_rs, rs, TEMP_1, TEMP_2);  // <BD slot>
+		const u32 converted_base_reg =
+			emitAddressConversion(op_rs, rs, TEMP_1, TEMP_2,
+			                      !emit_address_range_check);  // <BD slot>
 
 		// Code invalidation needs the original base register value. However,
 		//  it sometimes gets overwritten by the last load in a series.
@@ -935,6 +988,28 @@ static void general_loads_stores(const int  count,
 					continue;
 
 				const s16 op_imm = _fImm_(opcode);
+
+				//  Dedupe: if the NEXT store in the series hits the same RAM
+				// word (PS1 memcpy's swl 3(a1)/swr 0(a1) idiom), this store's
+				// invalidation nulls the same recRAM slot — skip it. Skipping
+				// forward (not backward) keeps the last-store exit-branch
+				// logic below intact.
+				if ((PC-4) != pc_of_last_store_in_series) {
+					u32 next_pc = PC;
+					int remain  = icount - 1;
+					bool same_word_follows = false;
+					while (remain-- > 0) {
+						const u32 nop_ = OPCODE_AT(next_pc);
+						next_pc += 4;
+						if (!opcodeIsStore(nop_))
+							continue;
+						same_word_follows =
+							((_fImm_(nop_) & ~3) == (op_imm & ~3));
+						break;
+					}
+					if (same_word_follows)
+						continue;
+				}
 
 				// See earlier notes at declaration of 'unmodified_base_reg'
 

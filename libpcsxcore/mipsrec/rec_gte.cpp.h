@@ -489,7 +489,7 @@ static void gen_LWC2_SWC2()
 				if (queue_entries > 0 && queue_entry_type == SWC2_ENTRIES) {
 					do {
 						if (!base_reg_converted) {
-							base_reg = emitAddressConversion(op_rs, rs, base_reg, conversion_temp_reg);
+							base_reg = emitAddressConversion(op_rs, rs, base_reg, conversion_temp_reg, true);
 							base_reg_converted = true;
 						}
 						const u8  entry_reg = queue_regmap[queue_idx_beg];
@@ -516,7 +516,7 @@ static void gen_LWC2_SWC2()
 				{
 					if (!base_reg_converted) {
 						// base_reg = converted 'rs' base reg, base_reg_temp used as temp reg
-						base_reg = emitAddressConversion(op_rs, rs, base_reg, conversion_temp_reg);
+						base_reg = emitAddressConversion(op_rs, rs, base_reg, conversion_temp_reg, true);
 						base_reg_converted = true;
 					}
 					const u8 entry_reg = queue_regmap[queue_idx_end];
@@ -560,7 +560,7 @@ static void gen_LWC2_SWC2()
 				if (queue_entries == queue_capacity) {
 					if (!base_reg_converted) {
 						// base_reg = converted 'rs' base reg, base_reg_temp used as temp reg
-						base_reg = emitAddressConversion(op_rs, rs, base_reg, conversion_temp_reg);
+						base_reg = emitAddressConversion(op_rs, rs, base_reg, conversion_temp_reg, true);
 						base_reg_converted = true;
 					}
 					const u8  entry_reg = queue_regmap[queue_idx_beg];
@@ -589,7 +589,7 @@ static void gen_LWC2_SWC2()
 					do {
 						if (!base_reg_converted) {
 							// base_reg = converted 'rs' base reg, base_reg_temp used as temp reg
-							base_reg = emitAddressConversion(op_rs, rs, base_reg, conversion_temp_reg);
+							base_reg = emitAddressConversion(op_rs, rs, base_reg, conversion_temp_reg, true);
 							base_reg_converted = true;
 						}
 						const u8  entry_reg = queue_regmap[queue_idx_beg];
@@ -609,7 +609,7 @@ static void gen_LWC2_SWC2()
 		// -----------------------------
 
 		if (!base_reg_converted) {
-			base_reg = emitAddressConversion(op_rs, rs, base_reg, conversion_temp_reg);
+			base_reg = emitAddressConversion(op_rs, rs, base_reg, conversion_temp_reg, true);
 			base_reg_converted = true;
 		}
 

@@ -289,6 +289,9 @@ static void regMipsChanged(u32 regpsx)
 		return;
 
 	regcache.psx[regpsx].psx_ischanged = true;
+
+	/* A cached converted address derived from this reg is now stale. */
+	lsu_note_guest_reg_write(regpsx);
 }
 
 static void regUnlock(u32 reghost)

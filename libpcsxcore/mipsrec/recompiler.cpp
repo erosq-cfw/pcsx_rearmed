@@ -493,6 +493,11 @@ static bool host_ra_reg_has_block_retaddr; /* Indirect-return address is cached 
 char	disasm_buffer[512];
 #endif
 
+/* Defined in rec_lsu.cpp.h (same TU, included later via opcodes.h):
+ * invalidates cached METHOD-1 converted addresses when a guest reg is
+ * written. Called from regMipsChanged(). */
+static void lsu_note_guest_reg_write(u32 regpsx);
+
 #include "regcache.h"
 
 static void recReset();
@@ -774,7 +779,6 @@ static void recRecompile()
 
 	DISASM_HOST();
 	clear_insn_cache(recMemStart, recMem, 0);
-
 }
 
 

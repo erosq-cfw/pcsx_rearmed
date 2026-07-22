@@ -224,6 +224,36 @@ do { \
 	regUnlock(r3); \
 } while (0)
 
+/* Fold an R-type op whose one operand is a known-const that is NOT already
+ * in a register-cache slot into the equivalent immediate form. This avoids
+ * materializing the const (LI32/LW) into one of the 8 cache slots just to
+ * feed a single R-type op. When the const IS already mapped, the plain
+ * R-type on the mapped reg is one instruction — optimal — so no fold.
+ * The immediate expression is snapshotted FIRST: SetUndef below would
+ * destroy the const operand's tracked value when it aliases the
+ * destination, and macro arguments evaluate lazily at their use site. */
+#define REC_RTYPE_FOLD_IMM(itype, _rd_, _other_, _imm_) \
+do { \
+	const s32 fimm__ = (_imm_); \
+	u32 fr1, fr2; \
+	SetUndef(_rd_); \
+	if ((_other_) == (_rd_)) { \
+		fr1 = regMipsToHost(_rd_, REG_LOAD, REG_REGISTER); \
+		fr2 = fr1; \
+	} else { \
+		fr1 = regMipsToHost(_rd_, REG_FIND, REG_REGISTER); \
+		fr2 = regMipsToHost(_other_, REG_LOAD, REG_REGISTER); \
+	} \
+	itype(fr1, fr2, fimm__); \
+	regMipsChanged(_rd_); \
+	regUnlock(fr1); \
+	regUnlock(fr2); \
+} while (0)
+
+#define LSU_UNMAPPED_CONST(r) (IsConst(r) && !regcache.psx[r].ismapped)
+#define IMM_FITS_S16(v) ((s32)(v) >= -32768 && (s32)(v) <= 32767)
+#define IMM_FITS_U16(v) ((u32)(v) <= 0xffffu)
+
 static void recADDU()
 {
 	// rd = rs + rt
@@ -261,7 +291,18 @@ static void recADDU()
 			fuzzy_scratchpad_addr = true;
 	}
 
-	REC_RTYPE_RD_RS_RT(ADDU, _Rd_, _Rs_, _Rt_);
+	bool folded = false;
+	if (_Rd_ && !set_const) {
+		if (rt_const && LSU_UNMAPPED_CONST(_Rt_) && IMM_FITS_S16(GetConst(_Rt_))) {
+			REC_RTYPE_FOLD_IMM(ADDIU, _Rd_, _Rs_, (s32)GetConst(_Rt_));
+			folded = true;
+		} else if (rs_const && LSU_UNMAPPED_CONST(_Rs_) && IMM_FITS_S16(GetConst(_Rs_))) {
+			REC_RTYPE_FOLD_IMM(ADDIU, _Rd_, _Rt_, (s32)GetConst(_Rs_));
+			folded = true;
+		}
+	}
+	if (!folded)
+		REC_RTYPE_RD_RS_RT(ADDU, _Rd_, _Rs_, _Rt_);
 
 	if (set_const)
 		SetConst(_Rd_, GetConst(_Rs_) + GetConst(_Rt_));
@@ -281,7 +322,13 @@ static void recSUBU()
 
 	const bool set_const = IsConst(_Rs_) && IsConst(_Rt_);
 
-	REC_RTYPE_RD_RS_RT(SUBU, _Rd_, _Rs_, _Rt_);
+	// rs - const == rs + (-const); -c must fit ADDIU's s16
+	if (_Rd_ && !set_const && LSU_UNMAPPED_CONST(_Rt_) &&
+	    (s32)GetConst(_Rt_) >= -32767 && (s32)GetConst(_Rt_) <= 32768) {
+		REC_RTYPE_FOLD_IMM(ADDIU, _Rd_, _Rs_, -(s32)GetConst(_Rt_));
+	} else {
+		REC_RTYPE_RD_RS_RT(SUBU, _Rd_, _Rs_, _Rt_);
+	}
 
 	if (set_const)
 		SetConst(_Rd_, GetConst(_Rs_) - GetConst(_Rt_));
@@ -294,7 +341,18 @@ static void recAND()
 
 	const bool set_const = IsConst(_Rs_) && IsConst(_Rt_);
 
-	REC_RTYPE_RD_RS_RT(AND, _Rd_, _Rs_, _Rt_);
+	bool folded = false;
+	if (_Rd_ && !set_const) {
+		if (LSU_UNMAPPED_CONST(_Rt_) && IMM_FITS_U16(GetConst(_Rt_))) {
+			REC_RTYPE_FOLD_IMM(ANDI, _Rd_, _Rs_, GetConst(_Rt_));
+			folded = true;
+		} else if (LSU_UNMAPPED_CONST(_Rs_) && IMM_FITS_U16(GetConst(_Rs_))) {
+			REC_RTYPE_FOLD_IMM(ANDI, _Rd_, _Rt_, GetConst(_Rs_));
+			folded = true;
+		}
+	}
+	if (!folded)
+		REC_RTYPE_RD_RS_RT(AND, _Rd_, _Rs_, _Rt_);
 
 	if (set_const)
 		SetConst(_Rd_, GetConst(_Rs_) & GetConst(_Rt_));
@@ -306,7 +364,18 @@ static void recOR()
 
 	const bool set_const = IsConst(_Rs_) && IsConst(_Rt_);
 
-	REC_RTYPE_RD_RS_RT(OR,  _Rd_, _Rs_, _Rt_);
+	bool folded = false;
+	if (_Rd_ && !set_const) {
+		if (LSU_UNMAPPED_CONST(_Rt_) && IMM_FITS_U16(GetConst(_Rt_))) {
+			REC_RTYPE_FOLD_IMM(ORI, _Rd_, _Rs_, GetConst(_Rt_));
+			folded = true;
+		} else if (LSU_UNMAPPED_CONST(_Rs_) && IMM_FITS_U16(GetConst(_Rs_))) {
+			REC_RTYPE_FOLD_IMM(ORI, _Rd_, _Rt_, GetConst(_Rs_));
+			folded = true;
+		}
+	}
+	if (!folded)
+		REC_RTYPE_RD_RS_RT(OR,  _Rd_, _Rs_, _Rt_);
 
 	if (set_const)
 		SetConst(_Rd_, GetConst(_Rs_) | GetConst(_Rt_));
@@ -318,7 +387,18 @@ static void recXOR()
 
 	const bool set_const = IsConst(_Rs_) && IsConst(_Rt_);
 
-	REC_RTYPE_RD_RS_RT(XOR, _Rd_, _Rs_, _Rt_);
+	bool folded = false;
+	if (_Rd_ && !set_const) {
+		if (LSU_UNMAPPED_CONST(_Rt_) && IMM_FITS_U16(GetConst(_Rt_))) {
+			REC_RTYPE_FOLD_IMM(XORI, _Rd_, _Rs_, GetConst(_Rt_));
+			folded = true;
+		} else if (LSU_UNMAPPED_CONST(_Rs_) && IMM_FITS_U16(GetConst(_Rs_))) {
+			REC_RTYPE_FOLD_IMM(XORI, _Rd_, _Rt_, GetConst(_Rs_));
+			folded = true;
+		}
+	}
+	if (!folded)
+		REC_RTYPE_RD_RS_RT(XOR, _Rd_, _Rs_, _Rt_);
 
 	if (set_const)
 		SetConst(_Rd_, GetConst(_Rs_) ^ GetConst(_Rt_));
@@ -342,7 +422,13 @@ static void recSLT()
 
 	const bool set_const = IsConst(_Rs_) && IsConst(_Rt_);
 
-	REC_RTYPE_RD_RS_RT(SLT,  _Rd_, _Rs_, _Rt_);
+	// Only the rt side folds (SLTI keeps rs as the left operand).
+	if (_Rd_ && !set_const && LSU_UNMAPPED_CONST(_Rt_) &&
+	    IMM_FITS_S16(GetConst(_Rt_))) {
+		REC_RTYPE_FOLD_IMM(SLTI, _Rd_, _Rs_, (s32)GetConst(_Rt_));
+	} else {
+		REC_RTYPE_RD_RS_RT(SLT,  _Rd_, _Rs_, _Rt_);
+	}
 
 	if (set_const)
 		SetConst(_Rd_, (s32)GetConst(_Rs_) < (s32)GetConst(_Rt_));
@@ -354,7 +440,15 @@ static void recSLTU()
 
 	const bool set_const = IsConst(_Rs_) && IsConst(_Rt_);
 
-	REC_RTYPE_RD_RS_RT(SLTU, _Rd_, _Rs_, _Rt_);
+	// SLTIU sign-extends its immediate before the UNSIGNED compare, so the
+	// fold is exact iff the const survives the s16 round trip (c <= 0x7fff
+	// or c >= 0xffff8000). Only the rt side folds.
+	if (_Rd_ && !set_const && LSU_UNMAPPED_CONST(_Rt_) &&
+	    IMM_FITS_S16((s32)GetConst(_Rt_))) {
+		REC_RTYPE_FOLD_IMM(SLTIU, _Rd_, _Rs_, (s32)GetConst(_Rt_));
+	} else {
+		REC_RTYPE_RD_RS_RT(SLTU, _Rd_, _Rs_, _Rt_);
+	}
 
 	if (set_const)
 		SetConst(_Rd_, GetConst(_Rs_) < GetConst(_Rt_));
@@ -704,16 +798,22 @@ do { \
 	regUnlock(r3); \
 } while (0)
 
+/* Variable shifts with a known-const shift amount fold to the immediate
+ * shift. Both guest SxxV and host SLL/SRL/SRA use (amount & 31) — exact. */
 static void recSLLV()
 {
 	// rd = rt << rs
 
 	const bool set_const = IsConst(_Rs_) && IsConst(_Rt_);
 
-	REC_RTYPE_RD_RT_RS(SLLV, _Rd_, _Rt_, _Rs_);
+	if (_Rd_ && !set_const && LSU_UNMAPPED_CONST(_Rs_)) {
+		REC_RTYPE_FOLD_IMM(SLL, _Rd_, _Rt_, GetConst(_Rs_) & 31);
+	} else {
+		REC_RTYPE_RD_RT_RS(SLLV, _Rd_, _Rt_, _Rs_);
+	}
 
 	if (set_const)
-		SetConst(_Rd_, GetConst(_Rt_) << GetConst(_Rs_));
+		SetConst(_Rd_, GetConst(_Rt_) << (GetConst(_Rs_) & 31));
 }
 
 static void recSRLV()
@@ -722,10 +822,14 @@ static void recSRLV()
 
 	const bool set_const = IsConst(_Rs_) && IsConst(_Rt_);
 
-	REC_RTYPE_RD_RT_RS(SRLV, _Rd_, _Rt_, _Rs_);
+	if (_Rd_ && !set_const && LSU_UNMAPPED_CONST(_Rs_)) {
+		REC_RTYPE_FOLD_IMM(SRL, _Rd_, _Rt_, GetConst(_Rs_) & 31);
+	} else {
+		REC_RTYPE_RD_RT_RS(SRLV, _Rd_, _Rt_, _Rs_);
+	}
 
 	if (set_const)
-		SetConst(_Rd_, GetConst(_Rt_) >> GetConst(_Rs_));
+		SetConst(_Rd_, GetConst(_Rt_) >> (GetConst(_Rs_) & 31));
 }
 
 static void recSRAV()
@@ -734,8 +838,12 @@ static void recSRAV()
 
 	const bool set_const = IsConst(_Rs_) && IsConst(_Rt_);
 
-	REC_RTYPE_RD_RT_RS(SRAV, _Rd_, _Rt_, _Rs_);
+	if (_Rd_ && !set_const && LSU_UNMAPPED_CONST(_Rs_)) {
+		REC_RTYPE_FOLD_IMM(SRA, _Rd_, _Rt_, GetConst(_Rs_) & 31);
+	} else {
+		REC_RTYPE_RD_RT_RS(SRAV, _Rd_, _Rt_, _Rs_);
+	}
 
 	if (set_const)
-		SetConst(_Rd_, (s32)GetConst(_Rt_) >> GetConst(_Rs_));
+		SetConst(_Rd_, (s32)GetConst(_Rt_) >> (GetConst(_Rs_) & 31));
 }
