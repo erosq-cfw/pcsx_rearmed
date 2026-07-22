@@ -355,6 +355,11 @@ endif
 ifeq "$(BUILTIN_GPU)" "unai"
 CFLAGS += -DGPU_UNAI
 CFLAGS += -DUSE_GPULIB=1
+# erosq never uses the old renderer; dropping it frees 256KB of BSS
+# (s_invTable) on the 32MB device. The menu toggle becomes a no-op.
+ifeq "$(PLATFORM)" "erosq"
+GPU_UNAI_NO_OLD = 1
+endif
 OBJS += plugins/gpu_unai/gpulib_if.o
 ifeq "$(ARCH)" "arm"
 OBJS += plugins/gpu_unai/gpu_arm.o
@@ -483,6 +488,10 @@ OBJS += frontend/plat_erosq.o frontend/drm_out.o
 frontend/main.o frontend/plugin_lib.o frontend/menu.o: CFLAGS += -DEROSQ
 LDLIBS += -ltinyalsa   # DAC hardware volume slider (plat_erosq erosq_vol_*)
 plugins/gpu_unai/gpulib_if.o: CFLAGS += -DGPU_UNAI_USE_MXU
+# hot render/GTE objects: the buildroot default -fstack-protector-strong
+# taxes every poly-driver and GTE call (canary load/check); measured in the
+# 2026-07-22 rasterizer audit. Keep hardening everywhere else.
+plugins/gpu_unai/gpulib_if.o libpcsxcore/gte.o: CFLAGS += -fno-stack-protector
 # X1000 MXU1 bgr555->rgb565 blit (~5x vs the scalarized generic-vector path);
 # 20% of native core time, every scene. Host diff-tested (test_cspace_mxu.cpp).
 frontend/cspace.o: CFLAGS += -DHAVE_bgr555_to_rgb565_mxu

@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 
 /* ---- scalar model of the MXU ops the kernel uses ---- */
 static uint32_t host_xr[17];
@@ -55,6 +56,19 @@ static inline uint32_t hx_slr16(uint32_t x, int s) {
 #define MXU_Q16SLR(a, b, c, d, s) do { uint32_t _b = hx_slr16(host_xr[b], s), _c = hx_slr16(host_xr[c], s); HX_SET(a, _b); HX_SET(d, _c); } while (0)
 #define MXU_S32AND(a, b, c) HX_SET(a, host_xr[b] & host_xr[c])
 #define MXU_S32OR(a, b, c)  HX_SET(a, host_xr[b] | host_xr[c])
+#define MXU_XR11 11
+#define MXU_XR12 12
+/* S32SFL ptn2==3 (halfword) and S32ALNI ptn3==2, per QEMU mxu_translate.c */
+#define MXU_S32SFL(a, b, c, d, ptn2) do { \
+	uint32_t _b = host_xr[b], _c = host_xr[c]; \
+	if ((ptn2) != 3) { fprintf(stderr, "model: only SFL ptn2=3\n"); exit(1); } \
+	HX_SET(a, (_b & 0xffff0000u) | (_c >> 16)); \
+	HX_SET(d, (_b << 16) | (_c & 0xffffu)); \
+} while (0)
+#define MXU_S32ALNI(a, b, c, ptn3) do { \
+	if ((ptn3) != 2) { fprintf(stderr, "model: only ALNI ptn3=2\n"); exit(1); } \
+	HX_SET(a, (host_xr[b] << 16) | (host_xr[c] >> 16)); \
+} while (0)
 
 #define HAVE_bgr555_to_rgb565_mxu
 #include "cspace.c"
@@ -109,6 +123,39 @@ static void run_case(int pixels, int src_off, int dst_off) {
 	}
 }
 
+/* ---- 512->320 fused decimate+convert vs independent pick+convert ---- */
+static const int picks512[10] = { 0, 2, 4, 5, 7, 8, 10, 12, 13, 15 };
+
+static void run_case_512(int dpixels, int src_off) {
+	for (int i = 0; i < GUARD + CAP + GUARD; i++) {
+		srcbuf[i] = (uint16_t)rnd();
+		uint16_t f = (uint16_t)rnd();
+		bufA[i] = f; bufB[i] = f;
+	}
+	const uint16_t *src = srcbuf + GUARD + src_off;
+	uint16_t *got = bufA + GUARD;
+	uint16_t *ref = bufB + GUARD;
+
+	bgr555_to_rgb565_512_to_320(got, src, dpixels);
+	/* reference: pick then single-pixel convert; only full 10-px groups */
+	for (int g = 0; g + 10 <= dpixels; g += 10)
+		for (int j = 0; j < 10; j++) {
+			uint16_t p;
+			ref_convert(&p, &src[(g / 10) * 16 + picks512[j]], 1);
+			ref[g + j] = p;
+		}
+
+	if (memcmp(bufA, bufB, sizeof(bufA)) != 0) {
+		fprintf(stderr, "FAIL512 dpixels=%d src_off=%d\n", dpixels, src_off);
+		for (int i = 0; i < GUARD + CAP + GUARD && fails < 8; i++)
+			if (bufA[i] != bufB[i]) {
+				fprintf(stderr, "  [%d] got=%04x ref=%04x\n",
+					i - GUARD, bufA[i], bufB[i]);
+				fails++;
+			}
+	}
+}
+
 int main(void) {
 	/* every length 0..64 (covers head/tail + all pixels%4), each at the four
 	 * src/dst alignment parities (matched -> MXU path, mismatched -> scalar
@@ -123,7 +170,15 @@ int main(void) {
 		run_case(px, rnd() & 1, rnd() & 1);
 	}
 
+	/* 512->320: dpixels 0..330 by 10 (incl. 320 = real row) + odd tails,
+	 * both src alignments (odd -> whole-row scalar fallback) */
+	for (int dp = 0; dp <= 330; dp += 5)
+		for (int so = 0; so <= 1; so++)
+			run_case_512(dp, so);
+	for (int t = 0; t < 100000; t++)
+		run_case_512((int)(rnd() % 330), rnd() & 1);
+
 	if (fails) { printf("bgr555 MXU: FAILED (%d mismatches shown)\n", fails); return 1; }
-	printf("bgr555 MXU OK\n");
+	printf("bgr555 MXU OK (incl. 512_to_320)\n");
 	return 0;
 }

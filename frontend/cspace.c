@@ -355,6 +355,69 @@ void bgr555_to_rgb565_512_to_320(void * __restrict__ dst_,
 	const uint16_t * __restrict__ src = src_;
 	uint32_t * __restrict__ dst = dst_;
 
+#ifdef HAVE_bgr555_to_rgb565_mxu
+	/* EROSQ X1000: fused decimate+convert, 16 src px -> 10 dst px per
+	 * iteration. The pick pattern (0,2)(4,5)(7,8)(10,12)(13,15) maps to
+	 * three S32SFL halfword packs, one S32ALNI mid-align, and one raw
+	 * word; the convert math is the proven bgr555_to_rgb565 MXU pipeline
+	 * (green LSB stays 0). ~4.6 vs 6.6 ins/px scalar. Bit-exact
+	 * (test_cspace_mxu.cpp). dst (u32*) is always 4-aligned; src must be
+	 * too, else the scalar loop below takes the whole row. */
+	if (!((uintptr_t)src & 3)) {
+		MXU_S32I2M(MXU_XR16, 1);          /* enable MXU ALU */
+		MXU_S32I2M(MXU_XR15, 0x07c007c0); /* green mask */
+
+		for (; dpixels >= 10; dpixels -= 10, src += 16, dst += 5) {
+			__builtin_prefetch(src + 48);
+			MXU_S32LDD(MXU_XR1, src);        /* px1 :px0  */
+			MXU_S32LDD(MXU_XR2, src + 2);    /* px3 :px2  */
+			MXU_S32LDD(MXU_XR3, src + 4);    /* px5 :px4  */
+			MXU_S32LDD(MXU_XR4, src + 6);    /* px7 :px6  */
+			MXU_S32LDD(MXU_XR5, src + 8);    /* px9 :px8  */
+			MXU_S32LDD(MXU_XR6, src + 10);   /* px11:px10 */
+			MXU_S32LDD(MXU_XR7, src + 12);   /* px13:px12 */
+			MXU_S32LDD(MXU_XR8, src + 14);   /* px15:px14 */
+			/* decimate: build the 5 output words */
+			MXU_S32SFL(MXU_XR0, MXU_XR2, MXU_XR1, MXU_XR9, 3);   /* px2 :px0  */
+			MXU_S32ALNI(MXU_XR10, MXU_XR5, MXU_XR4, 2);          /* px8 :px7  */
+			MXU_S32SFL(MXU_XR0, MXU_XR7, MXU_XR6, MXU_XR11, 3);  /* px12:px10 */
+			MXU_S32SFL(MXU_XR12, MXU_XR8, MXU_XR7, MXU_XR0, 3);  /* px15:px13 */
+			/* convert pair (XR9, XR3=px5:px4) -> dst[0..1] */
+			MXU_Q16SLL(MXU_XR1, MXU_XR9, MXU_XR3, MXU_XR2, 1);
+			MXU_Q16SLL(MXU_XR4, MXU_XR9, MXU_XR3, MXU_XR5, 11);
+			MXU_Q16SLR(MXU_XR6, MXU_XR1, MXU_XR2, MXU_XR7, 11);
+			MXU_S32AND(MXU_XR1, MXU_XR1, MXU_XR15);
+			MXU_S32AND(MXU_XR2, MXU_XR2, MXU_XR15);
+			MXU_S32OR(MXU_XR4, MXU_XR4, MXU_XR1);
+			MXU_S32OR(MXU_XR4, MXU_XR4, MXU_XR6);
+			MXU_S32OR(MXU_XR5, MXU_XR5, MXU_XR2);
+			MXU_S32OR(MXU_XR5, MXU_XR5, MXU_XR7);
+			MXU_S32STD(MXU_XR4, dst);
+			MXU_S32STD(MXU_XR5, dst + 1);
+			/* convert pair (XR10, XR11) -> dst[2..3] */
+			MXU_Q16SLL(MXU_XR1, MXU_XR10, MXU_XR11, MXU_XR2, 1);
+			MXU_Q16SLL(MXU_XR4, MXU_XR10, MXU_XR11, MXU_XR5, 11);
+			MXU_Q16SLR(MXU_XR6, MXU_XR1, MXU_XR2, MXU_XR7, 11);
+			MXU_S32AND(MXU_XR1, MXU_XR1, MXU_XR15);
+			MXU_S32AND(MXU_XR2, MXU_XR2, MXU_XR15);
+			MXU_S32OR(MXU_XR4, MXU_XR4, MXU_XR1);
+			MXU_S32OR(MXU_XR4, MXU_XR4, MXU_XR6);
+			MXU_S32OR(MXU_XR5, MXU_XR5, MXU_XR2);
+			MXU_S32OR(MXU_XR5, MXU_XR5, MXU_XR7);
+			MXU_S32STD(MXU_XR4, dst + 2);
+			MXU_S32STD(MXU_XR5, dst + 3);
+			/* convert single (XR12) -> dst[4] */
+			MXU_Q16SLL(MXU_XR1, MXU_XR12, MXU_XR0, MXU_XR0, 1);
+			MXU_Q16SLL(MXU_XR4, MXU_XR12, MXU_XR0, MXU_XR0, 11);
+			MXU_Q16SLR(MXU_XR6, MXU_XR1, MXU_XR0, MXU_XR0, 11);
+			MXU_S32AND(MXU_XR1, MXU_XR1, MXU_XR15);
+			MXU_S32OR(MXU_XR4, MXU_XR4, MXU_XR1);
+			MXU_S32OR(MXU_XR4, MXU_XR4, MXU_XR6);
+			MXU_S32STD(MXU_XR4, dst + 4);
+		}
+	}
+#endif
+
 	// 16 -> 10 to keep dst aligned
 	for (; dpixels >= 10; dpixels -= 10, src += 16, dst += 5) {
 		// picks a src pixel nearest to the center of the dst pixel

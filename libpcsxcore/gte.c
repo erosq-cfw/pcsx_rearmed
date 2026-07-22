@@ -199,6 +199,17 @@ static inline s32 mac123sub_s12(u32 id, u32 *flags, s32 in12, s32 subtrahend, in
 
 #else
 
+/* erosq: guarded flag-free MAC fast path (MIPS32: no add-with-carry flags,
+ * the generic __builtin_add_overflow chain costs ~15 insns per addend).
+ * Every mac123add4/mac123add_s12 addend is either an s16*s16 product
+ * (|a| <= 2^30) or a full s32 (|a| <= 2^31). With |base| <= 2^31 - 3*2^18,
+ * every partial sum is bounded by 2^43 - 2^12 < 2^43, so no step can
+ * overflow the 44-bit accumulator: the FLAG bits are provably untouched
+ * and the plain s64 sum equals the stepped result exactly.
+ * MAC123_FAST_OK(v) is off-by-one conservative for negative v — fine. */
+#define MAC123_FAST_LIM 0x7ff40000u /* 2^31 - 3*2^18 */
+#define MAC123_FAST_OK(v) ((u32)((v) ^ ((v) >> 31)) < MAC123_FAST_LIM)
+
 static inline s64 mac123add(u32 id, u32 *flags, s64 in, s32 addend) {
 	s64 a;
 #if defined(__arm__)
@@ -229,7 +240,11 @@ static inline s64 mac123add(u32 id, u32 *flags, s64 in, s32 addend) {
 	return a;
 }
 
-static inline s64 mac123add4(u32 id, u32 *flags, s32 a1, s32 a2, s32 a3, s32 a4, int shift) {
+static __attribute__((always_inline)) inline s64 mac123add4(u32 id, u32 *flags, s32 a1, s32 a2, s32 a3, s32 a4, int shift) {
+#ifdef __mips__
+	if (likely(MAC123_FAST_OK(a1)))
+		return (((s64)a1 << 12) + a2 + a3 + a4) >> shift;
+#endif
 	s64 a = (s64)a1 << (12 + MAC123_SHIFT);
 	a = mac123add(id, flags, a, a2);
 	a = mac123add(id, flags, a, a3);
@@ -237,12 +252,20 @@ static inline s64 mac123add4(u32 id, u32 *flags, s32 a1, s32 a2, s32 a3, s32 a4,
 	return a >> (shift + MAC123_SHIFT);
 }
 
-static inline s32 mac123add_s12(u32 id, u32 *flags, s32 in12, s32 addend, int shift) {
+static __attribute__((always_inline)) inline s32 mac123add_s12(u32 id, u32 *flags, s32 in12, s32 addend, int shift) {
+#ifdef __mips__
+	if (likely(MAC123_FAST_OK(in12)))
+		return (((s64)in12 << 12) + addend) >> shift;
+#endif
 	return mac123add(id, flags, (s64)in12 << (12+MAC123_SHIFT), addend) >> (shift+MAC123_SHIFT);
 }
 
-static inline s64 mac123sub_s12(u32 id, u32 *flags, s32 in12, s32 subtrahend, int shift) {
+static __attribute__((always_inline)) inline s64 mac123sub_s12(u32 id, u32 *flags, s32 in12, s32 subtrahend, int shift) {
 	s64 a;
+#ifdef __mips__
+	if (likely(MAC123_FAST_OK(in12)))
+		return (((s64)in12 << 12) - subtrahend) >> shift;
+#endif
 #if defined(__arm__)
 	u32 flag = 1u << (31 - id);
 	s64 in = (s64)in12 << (12+MAC123_SHIFT);

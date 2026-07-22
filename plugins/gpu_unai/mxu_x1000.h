@@ -143,4 +143,18 @@
 	_MXU_W((((s) << 1) << 21) | ((xrc) << 14) | ((xrb) << 10) | \
 	       ((xra) << 6) | 0x32u)
 
+/* S32SFL XRa, XRb, XRc, XRd, ptn2 : shuffle the XRb:XRc pair.
+ * ptn2==3 (halfword mode, the only one used here):
+ *   XRa = (XRb & 0xffff0000) | (XRc >> 16)     -- both hi halves
+ *   XRd = (XRb << 16)        | (XRc & 0xffff)  -- both lo halves */
+#define MXU_S32SFL(xra, xrb, xrc, xrd, ptn2) \
+	_MXU_W(((ptn2) << 24) | ((xrd) << 18) | ((xrc) << 14) | \
+	       ((xrb) << 10) | ((xra) << 6) | 0x3Du)
+
+/* S32ALNI XRa, XRb, XRc, ptn3 (POOL16 sel 2) : byte-align XRb:XRc.
+ * ptn3==2 (the only one used here): XRa = (XRb << 16) | (XRc >> 16) */
+#define MXU_S32ALNI(xra, xrb, xrc, ptn3) \
+	_MXU_W(((ptn3) << 23) | (2u << 18) | ((xrc) << 14) | \
+	       ((xrb) << 10) | ((xra) << 6) | 0x27u)
+
 #endif /* MXU_X1000_H */
