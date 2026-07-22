@@ -826,7 +826,16 @@ static bool emit_const_hw_load(u32 addr, u32 r2, u32 opcode, bool *C_func_called
 					break;
 
 				case 0x1814:  // GPU STATUS (Send GP1 Commands (Display Control))
-					indirect = true;
+					//  Games spin on GPUSTAT waiting for GPU-ready bits; the
+					// indirect fallback paid psxHwRead32's full switch dispatch
+					// per poll iteration. rearmed's psxHwRead32 does exactly
+					// `return psxHwReadGpuSR()` for 0x1814 (psxhw.c:286), so
+					// call it directly — bit-exact, same pattern as 0x1810's
+					// GPU_readData above.
+					JAL(psxHwReadGpuSR);
+					NOP();  // <BD>
+					*C_func_called = true;
+					move_result_out_of_v0 = true;
 					break;
 
 				case 0x1820:  // MDEC Data/Response Register (R)

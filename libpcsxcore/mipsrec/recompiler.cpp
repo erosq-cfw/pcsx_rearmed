@@ -435,9 +435,18 @@ extern "C" int mipsrec_init_mmap(void)
 		printf("mipsrec_init_mmap: psxH at 0x1f800000 failed\n"); goto fail;
 	}
 
-	/* Expansion ROM (psxP) — indirect-only, location doesn't matter. */
-	exp = mmap(NULL, 0x10000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-	if (exp == MAP_FAILED) { perror("mipsrec_init_mmap: psxP"); goto fail; }
+	/* Expansion region (psxP) — fixed at 0x1f000000, the address METHOD-1's
+	 * emitted conversion (host = 0x10000000 | (guest & 0x0fffffff)) produces
+	 * for guest 0x1f00_0000. The direct-path range check ADMITS the whole
+	 * expansion window (bits 23:12 < 0x801), so a non-const, non-fuzzy base
+	 * reg pointing there took the direct path into unmapped VA -> SIGSEGV.
+	 * Map the full 8MB window: anonymous pages cost no RSS unless touched,
+	 * and no real game touches expansion space through a computed pointer. */
+	exp = mmap((void *)0x1f000000, 0x800000, PROT_READ | PROT_WRITE,
+	           MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+	if (exp == MAP_FAILED || exp != (void *)0x1f000000) {
+		printf("mipsrec_init_mmap: psxP at 0x1f000000 failed\n"); goto fail;
+	}
 
 	/* BIOS (psxR) — indirect-only. */
 	bios = mmap(NULL, 0x80000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -458,7 +467,7 @@ fail:
 	while (n_ram_maps-- > 0)
 		munmap((void *)(uintptr_t)(PSX_MEM_VADDR + 0x200000ULL * n_ram_maps), 0x200000);
 	if (hw   != MAP_FAILED) munmap(hw,   0x10000);
-	if (exp  != MAP_FAILED) munmap(exp,  0x10000);
+	if (exp  != MAP_FAILED) munmap(exp,  0x800000);
 	if (bios != MAP_FAILED) munmap(bios, 0x80000);
 	if (fd >= 0) { close(fd); shm_unlink(shm_name); }
 	psx_mem_mapped = false;
@@ -765,6 +774,7 @@ static void recRecompile()
 
 	DISASM_HOST();
 	clear_insn_cache(recMemStart, recMem, 0);
+
 }
 
 
@@ -1283,6 +1293,7 @@ __asm__ __volatile__ (
 //  psxBranchTest. This helps reduce size of code through sharing.
 "la    $t0, branchtest_fastpath_retaddr%=     \n"
 "sw    $t0, f_off_branchtest_fastpath_ra($sp) \n"
+
 #endif
 
 // Set the global var 'block_ret_addr'.
@@ -1425,6 +1436,7 @@ __asm__ __volatile__ (
 "call_psxBranchTest_fastpath%=:               \n"
 "j     %[psxBranchTest]                       \n"
 "lw    $ra, f_off_branchtest_fastpath_ra($sp) \n" // <BD>
+
 
 #endif // USE_DIRECT_FASTPATH_BLOCK_RETURN_JUMPS
 

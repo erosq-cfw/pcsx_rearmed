@@ -23,25 +23,63 @@
 #define SKIP_MFC2_WRITEBACK
 
 
+/* Baked GTE dispatch: plugin.c resolves each no-arg op's flag-specialized
+ * handler once at startup (gte_h_*) and exports the exact code word it feeds
+ * that handler (gte_code_*). Emitting `JAL <handler>` with (a0=&psxRegs.CP2,
+ * a1=code) is therefore identical-by-construction to calling the shim — it
+ * only skips the shim's own 14-insn call frame. Falls back to the shim if
+ * the handler is somehow unresolved. */
+extern "C" {
+#define GTE_BAKED_DECL(f) \
+	extern gte_handler *gte_h_##f; \
+	extern const u32 gte_code_##f;
+GTE_BAKED_DECL(RTPS)  GTE_BAKED_DECL(NCLIP) GTE_BAKED_DECL(NCDS)
+GTE_BAKED_DECL(NCDT)  GTE_BAKED_DECL(CDP)   GTE_BAKED_DECL(NCCS)
+GTE_BAKED_DECL(CC)    GTE_BAKED_DECL(NCS)   GTE_BAKED_DECL(NCT)
+GTE_BAKED_DECL(DPCT)  GTE_BAKED_DECL(AVSZ3) GTE_BAKED_DECL(AVSZ4)
+GTE_BAKED_DECL(RTPT)  GTE_BAKED_DECL(NCCT)
+#undef GTE_BAKED_DECL
+}
+
 /* Emit code to call a GTE func that takes no arguments */
 #define CP2_FUNC_0(f) \
 extern void gte##f(); \
 void rec##f() \
 { \
-	JAL(gte##f); \
-	NOP(); /* <BD slot> */ \
+	if (gte_h_##f) { \
+		LI32(MIPSREG_A1, gte_code_##f); \
+		JAL((u32)gte_h_##f); \
+		ADDIU(MIPSREG_A0, PERM_REG_1, off(CP2)); /* <BD> a0 = &psxRegs.CP2 */ \
+	} else { \
+		JAL(gte##f); \
+		NOP(); /* <BD slot> */ \
+	} \
 }
 
 /* Emit code to call a GTE func that takes one argument, which is the 32-bit
  *  opcode shifted right 10, from which it gets various parameters. No more than
  *  16 of the LSBs of the argument are used, so it can be passed with LI16.
+ *
+ * Baked variant: the full opcode word is known at recompile time, so resolve
+ * the handler now and call it directly, skipping the shim + gteDispatch's
+ * runtime re-decode (~30 insns + stack-protector frame per op — MVMVA runs
+ * per-vertex in MGS). The word is built exactly as the shim chain builds it:
+ * shim receives a0=(u16)(code>>10) and calls gteDispatch(OPVAL|((a0&0xffff)<<10)).
  */
 #define CP2_FUNC_1(f) \
 extern void gte##f(u32 gteop); \
 void rec##f() \
 { \
-	JAL(gte##f); \
-	LI16(MIPSREG_A0, (u16)(psxRegs.code >> 10)); /* <BD slot> */ \
+	const u32 gteword__ = (u32)(GTEOP_##f) | (((psxRegs.code >> 10) & 0xffffu) << 10); \
+	gte_handler *gtehnd__ = gteGetHandler(gteword__); \
+	if (gtehnd__) { \
+		LI32(MIPSREG_A1, gteword__); \
+		JAL((u32)gtehnd__); \
+		ADDIU(MIPSREG_A0, PERM_REG_1, off(CP2)); /* <BD> a0 = &psxRegs.CP2 */ \
+	} else { \
+		JAL(gte##f); \
+		LI16(MIPSREG_A0, (u16)(psxRegs.code >> 10)); /* <BD slot> */ \
+	} \
 }
 
 CP2_FUNC_0(RTPS)

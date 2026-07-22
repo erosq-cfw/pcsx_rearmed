@@ -301,20 +301,29 @@ void sioWrite32(u32 value)
  * Crash gameplay) — GTE dispatch was never the pcsx4all gap; that was GPU fill
  * + uncached present (see the erosq perf commit). Kept because it is correct,
  * general, and strictly leaner than routing every op through gteDispatch. */
+/* gte_h_/gte_code_ are exported so rec_gte.cpp.h can bake a direct JAL to the
+ * resolved handler at recompile time (skipping this shim entirely on the hot
+ * path). Resolved in a constructor instead of lazily: the `if (!h)` cold
+ * branch forced GCC to build a full stack frame in every shim, turning a
+ * 2-insn tail call into a 14-insn call. Same handler, same code word — the
+ * word is built HERE, once, and shared with the emitter (single source of
+ * truth for the sf/lm bits that caused subtle bugs when duplicated). */
 #define GTE_SHIM0_LM1(NAME, OPVAL) \
+	const u32 gte_code_##NAME = (u32)(OPVAL) | GTE_SF_BIT | GTE_LM_BIT; \
+	gte_handler *gte_h_##NAME; \
+	static void __attribute__((constructor)) gte_resolve_##NAME(void) { \
+		gte_h_##NAME = gteGetHandler(gte_code_##NAME); } \
 	void gte##NAME(void) { \
-		static gte_handler *h; \
-		const u32 code = (u32)(OPVAL) | GTE_SF_BIT | GTE_LM_BIT; \
-		if (!h) h = gteGetHandler(code); \
-		h(&psxRegs.CP2, code); \
+		gte_h_##NAME(&psxRegs.CP2, gte_code_##NAME); \
 	}
 
 #define GTE_SHIM0_LM0(NAME, OPVAL) \
+	const u32 gte_code_##NAME = (u32)(OPVAL) | GTE_SF_BIT; \
+	gte_handler *gte_h_##NAME; \
+	static void __attribute__((constructor)) gte_resolve_##NAME(void) { \
+		gte_h_##NAME = gteGetHandler(gte_code_##NAME); } \
 	void gte##NAME(void) { \
-		static gte_handler *h; \
-		const u32 code = (u32)(OPVAL) | GTE_SF_BIT; \
-		if (!h) h = gteGetHandler(code); \
-		h(&psxRegs.CP2, code); \
+		gte_h_##NAME(&psxRegs.CP2, gte_code_##NAME); \
 	}
 
 #define GTE_SHIM1(NAME, OPVAL) \

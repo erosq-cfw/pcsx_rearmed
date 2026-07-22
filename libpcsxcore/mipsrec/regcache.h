@@ -105,6 +105,57 @@ static void regFreeRegs(void)
 	if (!firstfound) DEBUGF("FATAL ERROR: unable to free register");
 }
 
+/* Evict a single register instead of regFreeRegs()'s wipe-all-8: prefer a
+ * dead unmapped temporary (REG_REGISTERBRANCH leftovers cost nothing), else
+ * the least-recently-used mapped reg (host_age is maintained by regUpdate()
+ * every guest instruction but was never consulted before this). Straight-line
+ * PS1 code regularly touches >8 distinct guest regs per block; the wipe-all
+ * policy forced a full spill+reload cycle each time that happened.
+ * Returns freed host reg, or 0xFF if every candidate is locked. */
+static u32 regEvictOne(void)
+{
+	int best = -1, besti = -1;
+	u32 best_age = 0;
+	bool best_dead = false;
+
+	for (int i = 0; regcache.reglist[i] != 0xFF; i++) {
+		int hr = regcache.reglist[i];
+		if (regcache.host[hr].host_islocked)
+			continue;
+		if (regcache.host[hr].host_type == REG_EMPTY) {
+			best = hr; besti = i; best_dead = true;
+			break; // free slot below the scan pointer: take it outright
+		}
+		bool dead = !regcache.host[hr].ismapped;
+		if (best < 0 || (dead && !best_dead) ||
+		    (dead == best_dead && regcache.host[hr].host_age >= best_age)) {
+			best = hr; besti = i;
+			best_dead = dead;
+			best_age = regcache.host[hr].host_age;
+		}
+	}
+	if (best < 0)
+		return 0xFF;
+
+	if (regcache.host[best].ismapped) {
+		int psxreg = regcache.host[best].mappedto;
+		if (regcache.psx[psxreg].psx_ischanged)
+			SW(best, PERM_REG_1, offGPR(psxreg));
+		regcache.psx[psxreg].psx_ischanged = false;
+		regcache.psx[psxreg].ismapped = false;
+		regcache.psx[psxreg].mappedto = 0;
+	}
+	regcache.host[best].ismapped = false;
+	regcache.host[best].mappedto = 0;
+	regcache.host[best].host_type = REG_EMPTY;
+	regcache.host[best].host_age = 0;
+	regcache.host[best].host_use = 0;
+	regcache.host[best].host_islocked = 0;
+
+	regcache.reglist_cnt = besti; // resume allocation scan at the freed slot
+	return best;
+}
+
 static u32 regAllocHost()
 {
 	//DEBUGF("regMipsToHostHelper regpsx %d action %d type %d reglist_cnt %d", regpsx, action, type, regcache.reglist_cnt);
@@ -125,10 +176,15 @@ static u32 regAllocHost()
 
 	//DEBUGF("regnum 2 %d", regnum);
 	if (regnum == 0xFF) {
-		regFreeRegs();
-		regnum = regcache.reglist[regcache.reglist_cnt];
-		if (regnum == 0xff)
-			regClearJump();
+		if (regEvictOne() != 0xFF) {
+			regnum = regcache.reglist[regcache.reglist_cnt];
+		} else {
+			// every reg locked: keep the old last-resort behavior
+			regFreeRegs();
+			regnum = regcache.reglist[regcache.reglist_cnt];
+			if (regnum == 0xff)
+				regClearJump();
+		}
 	}
 
 	regcache.reglist_cnt++;

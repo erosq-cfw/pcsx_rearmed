@@ -689,20 +689,35 @@ static void general_loads_stores(const int  count,
 					//  for range check: This is because SLTIU instruction sign-
 					//  extends its 16-bit immediate, which is a bit quirky.
 
-					ADDIU(MIPSREG_A0, rs, imm_max);
+					// When imm_max == 0 (bare pointer deref, the most common
+					//  load shape) the max effective address IS the base reg:
+					//  skip the ADDIU. Nothing downstream needs MIPSREG_A0 in
+					//  this branch — the indirect path recomputes its own A0
+					//  per access (JAL BD slots), and the invalidation path
+					//  is not emitted here.
+					if (imm_max == 0) {
 #ifdef HAVE_MIPS32R2_EXT_INS
-					EXT(TEMP_1, MIPSREG_A0, 12, 12);
+						EXT(TEMP_1, rs, 12, 12);
 #else
-					SRL(TEMP_1, MIPSREG_A0, 12);
-					ANDI(TEMP_1, TEMP_1, 0x0fff);
+						SRL(TEMP_1, rs, 12);
+						ANDI(TEMP_1, TEMP_1, 0x0fff);
 #endif
+					} else {
+						ADDIU(MIPSREG_A0, rs, imm_max);
+#ifdef HAVE_MIPS32R2_EXT_INS
+						EXT(TEMP_1, MIPSREG_A0, 12, 12);
+#else
+						SRL(TEMP_1, MIPSREG_A0, 12);
+						ANDI(TEMP_1, TEMP_1, 0x0fff);
+#endif
+					}
 					// Note the use of 0x0801 here instead of 0xf801.
 					SLTIU(TEMP_1, TEMP_1, 0x0801);
 					backpatch_label_hle_1 = (u32 *)recMem;
 					BEQZ(TEMP_1, 0);
 
 					// MIPSREG_A0 contains effective address of opcode with
-					//  maximum immediate offset.
+					//  maximum immediate offset (unless imm_max == 0).
 				}
 			} else
 			{
@@ -829,12 +844,20 @@ static void general_loads_stores(const int  count,
 				backpatch_label_exit_1 = 0;
 				if (icount == 1 && (emit_code_invalidation || emit_indirect)) {
 					// This is the end of the loop
-					backpatch_label_exit_1 = (u32 *)recMem;
-					if (emit_code_invalidation) {
+					//
+					// BUGFIX: the scratchpad-skip BLTZ tests MIPSREG_A1, which is
+					//  only loaded by the range-check block. On the fuzzy-RAM-base
+					//  path (invalidation on, range check off) A1 is stale garbage:
+					//  a negative leftover silently skipped SMC invalidation.
+					//  Fuzzy-RAM addresses are RAM by definition — fall through
+					//  into the invalidation unconditionally there.
+					if (emit_code_invalidation && emit_address_range_check) {
+						backpatch_label_exit_1 = (u32 *)recMem;
 						// If addresses were in scratchpad, skip both code
 						//  invalidation and the indirect code.
 						BLTZ(MIPSREG_A1, 0); // bltz label_exit
-					} else {
+					} else if (emit_indirect) {
+						backpatch_label_exit_1 = (u32 *)recMem;
 						// Skip indirect code
 						B(0); // b label_exit
 					}
@@ -868,12 +891,15 @@ static void general_loads_stores(const int  count,
 
 				if (icount == 1 && (emit_code_invalidation || emit_indirect)) {
 					// This is the end of the loop
-					backpatch_label_exit_1 = (u32 *)recMem;
-					if (emit_code_invalidation) {
+					// (Same stale-A1 BUGFIX as the store path above: only test
+					//  A1 when the range check actually loaded it.)
+					if (emit_code_invalidation && emit_address_range_check) {
+						backpatch_label_exit_1 = (u32 *)recMem;
 						// If addresses were in scratchpad, skip both code
 						//  invalidation and the indirect code.
 						BLTZ(MIPSREG_A1, 0); // bltz label_exit
-					} else {
+					} else if (emit_indirect) {
+						backpatch_label_exit_1 = (u32 *)recMem;
 						// Skip indirect code
 						B(0); // b label_exit
 					}
