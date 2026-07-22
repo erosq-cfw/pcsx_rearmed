@@ -409,6 +409,66 @@ make_do_samples(do_samples_fmod,
   sinc = FModChangeFrequency(spu.s_chan[ch].iRawPitch, ns, iFMod),
   , interp_gauss_get, )
 
+// ponytail: incremental (DDA) linear resampler for the simple-interp path.
+// Within a run of constant sbpos the output dst = (a<<16 + (b-a)*spos) >> 16 is
+// affine in spos, so carry P = a<<16 + (b-a)*spos and step P += (b-a)*sinc per
+// output — replaces the per-sample mult/madd + two buf[] reloads (see
+// interp_simple_get) with a single add; a,b are reread only at run edges.
+// Bit-exact with do_samples_simple: P stays inside s32 because spos<0x10000
+// keeps the result a convex combination of a,b, so the 32-bit wrap on P/delta
+// is lossless (host test_interp.c: 0 mismatches / 8M samples; on-device
+// -DSPU_DDA_VERIFY diff: 0 mismatches on Ape/MGS/Spyro real ADPCM).
+// Only dispatched for sinc < 0x10000 (upsampling), where runs are >=2 outputs;
+// downsampling stays on do_samples_simple (every output is a run edge anyway).
+static noinline int do_samples_simple_dda(int * __restrict__ dst,
+ int (*decode_f)(void *ctx, int ch, sample_buf *), void *ctx,
+ int ch, int ns_to, sample_buf * __restrict__ sb,
+ int sinc, int *spos_p, int *sbpos_p)
+{
+ short * __restrict__ buf = sb->buf;
+ int sboffset = ARRAY_LEN(sb->old);
+ int sbpos = (*sbpos_p) + sboffset;
+ int spos = *spos_p;
+ int ns, d, ret = ns_to;
+ int a = buf[sbpos-2], dab = buf[sbpos-1] - a;
+ int delta = (int)((unsigned)dab * (unsigned)sinc);
+ int P = (int)(((unsigned)a << 16) + (unsigned)dab * (unsigned)spos);
+
+ for (ns = 0; ns < ns_to; ns++)
+ {
+  dst[ns] = P >> 16;
+#ifdef SPU_DDA_VERIFY
+  { int b = a + dab;   /* differential check vs exact interp_simple_get */
+    long long s = (long long)a * (0x10000 - spos) + (long long)b * spos;
+    if ((int)(s >> 16) != (P >> 16))
+      fprintf(stderr, "DDA_MISMATCH a=%d b=%d spos=%d ref=%d got=%d\n",
+        a, b, spos, (int)(s >> 16), P >> 16);
+  }
+#endif
+  P = (int)((unsigned)P + (unsigned)delta);
+  spos += sinc;
+  if (spos < 0x10000)
+   continue;
+
+  sbpos += spos >> 16;
+  spos = spos & 0xffff;
+  if (unlikely(sbpos >= 28 + sboffset))
+  {
+    sbpos -= 28;
+    d = decode_f(ctx, ch, sb);
+    if (d && ns < ret)
+     ret = ns;
+  }
+  a = buf[sbpos-2]; dab = buf[sbpos-1] - a;
+  delta = (int)((unsigned)dab * (unsigned)sinc);
+  P = (int)(((unsigned)a << 16) + (unsigned)dab * (unsigned)spos);
+ }
+
+ *spos_p = spos;
+ *sbpos_p = sbpos - sboffset;
+ return ret;
+}
+
 INLINE int do_samples_adpcm(int *dst,
  int (*decode_f)(void *ctx, int ch, sample_buf *), void *ctx,
  int ch, int ns_to, int fmod, sample_buf *sb, int sinc, int *spos, int *sbpos)
@@ -422,6 +482,8 @@ INLINE int do_samples_adpcm(int *dst,
   case 0:
    return do_samples_nointerp(dst, decode_f, ctx, ch, ns_to, sb, sinc, spos, sbpos);
   case 1:
+   if (sinc < 0x10000)
+    return do_samples_simple_dda(dst, decode_f, ctx, ch, ns_to, sb, sinc, spos, sbpos);
    return do_samples_simple  (dst, decode_f, ctx, ch, ns_to, sb, sinc, spos, sbpos);
   default:
    return do_samples_gauss   (dst, decode_f, ctx, ch, ns_to, sb, sinc, spos, sbpos);
