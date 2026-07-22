@@ -30,6 +30,25 @@ static snd_pcm_uframes_t period_size;
 
 static void alsa_finish(void);
 
+/* Prime the (empty) stream with silence so the buffer rides with real
+ * headroom. The SPU generates at exactly the DAC's consume rate, so a drained
+ * buffer NEVER refills by itself: after one stall it sits near-empty forever
+ * and every scheduling hiccup afterwards is an audible underrun (~6/s
+ * measured). Priming at stream start / xrun / write-error -- where the stream
+ * is already silent or broken -- buys that headroom back for free. */
+static void alsa_prime_silence(void)
+{
+ static const char zeros[4096];
+ snd_pcm_uframes_t left = period_size ? period_size * 3 : sizeof(zeros) / 4;
+ while (left > 0)
+  {
+   snd_pcm_uframes_t n = left < sizeof(zeros) / 4 ? left : sizeof(zeros) / 4;
+   if (snd_pcm_writei(handle, zeros, n) < 0)
+    break;
+   left -= n;
+  }
+}
+
 // SETUP SOUND
 static int alsa_init(void)
 {
@@ -161,6 +180,22 @@ static int alsa_init(void)
   fprintf(stderr, "alsa: buffer_time=%uus buffer_size=%lu period_size=%lu avail=%lu\n",
    buffer_time, (unsigned long)bs, (unsigned long)ps, (unsigned long)buffer_size);
  }
+
+ /* explicit start/wakeup thresholds -- don't rely on libasound defaults.
+  * Start once the silence prime is in so the stream never begins dry. */
+ {
+  snd_pcm_sw_params_t *swparams;
+  snd_pcm_sw_params_alloca(&swparams);
+  if (snd_pcm_sw_params_current(handle, swparams) == 0) {
+   snd_pcm_sw_params_set_start_threshold(handle, swparams,
+    period_size ? period_size * 2 : buffer_size / 2);
+   snd_pcm_sw_params_set_avail_min(handle, swparams,
+    period_size ? period_size : 1);
+   if ((err = snd_pcm_sw_params(handle, swparams)) < 0)
+    printf("sw params: %s\n", snd_strerror(err));
+  }
+ }
+ alsa_prime_silence();
  retval = 0;
 
 out:
@@ -189,22 +224,21 @@ static int alsa_busy(void)
   return 1;
  l = snd_pcm_avail(handle);
  if (l < 0) return 0;
- if (l < buffer_size / 2)                            // can we write in at least the half of fragments?
-      l = 1;                                         // -> no? wait
- else l = 0;                                         // -> else go on
+ if (l < buffer_size / 2)
+      l = 1;
+ else l = 0;
 
  return l;
 }
 
 // FEED SOUND DATA
 /* ponytail: EROSQ_ADBG=1 -> count/print ALSA underruns (XRUNs). Diagnostic only,
- * gated by env, zero cost when off. Strip after the audio-stutter hunt. */
+ * gated by env, zero cost when off. Kept as permanent tooling (EROSQ_PROF
+ * precedent): it root-caused three distinct audio bugs in one week. */
 static unsigned long g_xruns, g_feeds;
 static int g_adbg = -1;
 static void alsa_feed(void *pSound, int lBytes)
 {
- char sbuf[4096];
-
  if (handle == NULL) return;
 
  if (g_adbg < 0) g_adbg = getenv("EROSQ_ADBG") ? 1 : 0;
@@ -233,48 +267,37 @@ static void alsa_feed(void *pSound, int lBytes)
   }
  }
 
- if (snd_pcm_state(handle) == SND_PCM_STATE_XRUN)
-  {
-   if (g_adbg) {
-    struct timespec _t; clock_gettime(CLOCK_MONOTONIC, &_t);
-    g_xruns++;
-    fprintf(stderr, "ADBG xrun #%lu at %ld.%03lds (feeds=%lu avail=%ld)\n",
-     g_xruns, (long)_t.tv_sec, _t.tv_nsec / 1000000L, g_feeds,
-     (long)snd_pcm_avail(handle));
-   }
-   /* Recover and prime with ONE period of silence, not ~70ms. The legacy
-    * 3*1024-frame prime turned every underrun into an audible dropout; a single
-    * period is enough to restart cleanly and keeps the gap near-inaudible. */
-   memset(sbuf, 0, sizeof(sbuf));
-   snd_pcm_prepare(handle);
-   {
-    snd_pcm_uframes_t prime = period_size ? period_size : sizeof(sbuf) / 4;
-    if (prime > sizeof(sbuf) / 4) prime = sizeof(sbuf) / 4;
-    snd_pcm_writei(handle, sbuf, prime);
-   }
-  }
- else
-  {
-   int l = snd_pcm_avail(handle);
-   if (l < lBytes / 4)
-    {
-     if (g_adbg) {
-      static unsigned long g_drops, g_dropped_frames;
-      g_drops++; g_dropped_frames += lBytes / 4 - l;
-      fprintf(stderr, "ADBG drop #%lu (avail=%d want=%d total_dropped=%lu)\n",
-       g_drops, l, lBytes / 4, g_dropped_frames);
-     }
-     if (l == 0)
-      return;
-
-     lBytes = l * 4;
-    }
-  }
-
+ /* Blocking write of the WHOLE chunk. The old path polled state+avail and
+  * truncated to avoid blocking; both checks raced the hardware (an xrun
+  * between avail and writei fed a negative count to writei) and the
+  * truncation chopped 100-700 frame tails several times a second -- audible
+  * clicks that no buffer sizing could fix. Blocking instead backpressures
+  * the emu to the DAC clock (the only clock that matters here) and drops
+  * nothing. On error (xrun after a genuine emu stall): recover, re-prime
+  * with silence headroom, retry once, give up on the chunk if still bad. */
  {
-  snd_pcm_sframes_t w = snd_pcm_writei(handle, pSound, lBytes / 4);
-  if (w < 0)
-   snd_pcm_recover(handle, w, 1);          // EPIPE/ESTRPIPE -> prepare, no silence
+  char *p = pSound;
+  int left = lBytes / 4, tries = 2;
+  while (left > 0)
+   {
+    snd_pcm_sframes_t w = snd_pcm_writei(handle, p, left);
+    if (w < 0)
+     {
+      if (g_adbg) {
+       struct timespec _t; clock_gettime(CLOCK_MONOTONIC, &_t);
+       g_xruns++;
+       fprintf(stderr, "ADBG xrun #%lu at %ld.%03lds (feeds=%lu err=%ld)\n",
+        g_xruns, (long)_t.tv_sec, _t.tv_nsec / 1000000L, g_feeds, (long)w);
+      }
+      if (--tries < 0)
+       break;
+      snd_pcm_recover(handle, w, 1);
+      alsa_prime_silence();
+      continue;
+     }
+    p += w * 4;
+    left -= w;
+   }
  }
 }
 

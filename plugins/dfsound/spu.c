@@ -1222,6 +1222,49 @@ void CALLBACK SPUupdate(void)
 
 // XA AUDIO
 
+/* ponytail: XA-ring diagnostic, gated by EROSQ_ADBG (same flag as alsa.c).
+ * The downstream ALSA probe can't see music-only stutter because the SPU keeps
+ * emitting SFX/silence frames while the XA ring is dry. This watches the ring
+ * directly: low-water occupancy at each sector arrival, inter-arrival gap (a
+ * spike = CD-XA delivery stall), and the underrun event (ring fully drained
+ * before the next sector). Zero cost when off. Kept as permanent tooling
+ * (EROSQ_PROF precedent) — pair with alsa.c's ADBG for any audio hunt. */
+static void xa_adbg(int is_start)
+{
+ static int on = -1;
+ if (on < 0) on = getenv("EROSQ_ADBG") ? 1 : 0;
+ if (!on) return;
+
+ unsigned int cap = (unsigned int)(spu.XAEnd - spu.XAStart);   // 44100 frames
+ unsigned int occ = spu.XAFeed >= spu.XAPlay
+   ? (unsigned int)(spu.XAFeed - spu.XAPlay)
+   : (unsigned int)((spu.XAEnd - spu.XAPlay) + (spu.XAFeed - spu.XAStart));
+
+ unsigned long long now = prof_now_ns();
+ static unsigned long long prev_ns, win_ns;
+ static unsigned long sectors, underruns, min_occ;
+ static int have_min;
+ unsigned long gap_ms = prev_ns ? (unsigned long)((now - prev_ns) / 1000000ULL) : 0;
+ prev_ns = now;
+
+ sectors++;
+ if (!have_min || occ < min_occ) { min_occ = occ; have_min = 1; }
+
+ /* ring fully drained before this sector arrived => audible music gap */
+ if (!is_start && occ == 0) {
+  underruns++;
+  fprintf(stderr, "XADBG underrun #%lu gap=%lums at %llu.%03llus (cap=%u)\n",
+   underruns, gap_ms, now / 1000000000ULL, (now / 1000000ULL) % 1000ULL, cap);
+ }
+
+ if (win_ns == 0) win_ns = now;
+ else if (now - win_ns >= 1000000000ULL) {
+  fprintf(stderr, "XADBG %lu sectors/s, %lu underruns, min_occ=%lu/%u frames (%lums buffered)\n",
+   sectors, underruns, min_occ, cap, min_occ * 1000UL / 44100UL);
+  sectors = 0; have_min = 0; win_ns = now;
+ }
+}
+
 void CALLBACK SPUplayADPCMchannel(xa_decode_t *xap, unsigned int cycle, int is_start)
 {
  if(!xap)       return;
@@ -1229,6 +1272,7 @@ void CALLBACK SPUplayADPCMchannel(xa_decode_t *xap, unsigned int cycle, int is_s
 
  if (is_start)
   spu.XAPlay = spu.XAFeed = spu.XAStart;
+ xa_adbg(is_start);                    // ponytail: measure ring BEFORE feed (low-water)
  if (spu.XAPlay == spu.XAFeed)
   do_samples(cycle, 1);                // catch up to prevent source underflows later
 

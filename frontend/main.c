@@ -145,11 +145,11 @@ void emu_set_default_config(void)
 	spu_config.iVolume = 768;
 	spu_config.iTempo = 0;
 #ifdef EROSQ
-	/* self-heal the ALSA buffer after emu-thread stalls (SD/CHD read spikes):
-	 * regenerate samples whenever the buffer drops below half. Without this,
-	 * one stall leaves the buffer near-empty forever and every later hiccup
-	 * underruns again (PaRappa XA-audio stutter). Engages only on under-fill. */
-	spu_config.iTempo = 1;
+	/* iTempo stays OFF: its refill (-768 cycle chunks ~= +19% sample rate)
+	 * drains the XA music ring dry (Spyro crackle) and the excess gets
+	 * floor-dropped at the feed boundary anyway. Buffer headroom after
+	 * emu-thread stalls comes from alsa.c's silence re-prime instead,
+	 * which never touches the emulated clock. */
 #endif
 	// may cause issues, no effect if only 1 core is detected
 	spu_config.iUseThread = 0;
