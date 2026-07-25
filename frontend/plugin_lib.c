@@ -42,6 +42,9 @@ extern unsigned long long g_prof_gpu_ns, g_prof_present_ns, g_prof_spu_ns;
 #include "../libpcsxcore/r3000a.h"
 #include "../libpcsxcore/psxcounters.h"
 #include "arm_features.h"
+#ifdef EROSQ
+#include "libpicofe/linux/in_evdev.h"   /* in_evdev_hotplug_check, see update_input */
+#endif
 
 #define HUD_HEIGHT 10
 
@@ -744,6 +747,14 @@ static void update_input(void)
 	int i;
 
 	in_update(actions);
+#ifdef EROSQ
+	/* A BT pad's evdev node comes and goes with the connection, so re-probe
+	 * when the device set changes -- otherwise the pad is dead until the
+	 * emulator is restarted. Deliberately after in_update(), not inside the
+	 * driver: in_probe() frees the driver data that loop is walking. */
+	if (in_evdev_hotplug_check())
+		in_probe();
+#endif
 	if (in_type[0] == PSE_PAD_TYPE_ANALOGJOY || in_type[0] == PSE_PAD_TYPE_ANALOGPAD)
 		update_analogs();
 	emu_act = actions[IN_BINDTYPE_EMU];
