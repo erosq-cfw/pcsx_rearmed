@@ -29,6 +29,7 @@
 
 static int mxu_spans_on = 1;      /* EROSQ_MXU=0 disables at runtime (A/B) */
 static int pskip_on = 1;          /* EROSQ_PSKIP=0 disables at runtime (A/B) */
+static int prelight_mode = 3;     /* EROSQ_PRELIGHT bit0=polys bit1=sprites (A/B) */
 /* Hi-res horizontal column-skip mask (pcsx4all "blit_mask" lineage). Nonzero
  * only in 512/640-wide modes: bit (vram_column & 7) set = present_scaled's
  * nearest-neighbour xmap (x*hres/320) never samples that column, so textured

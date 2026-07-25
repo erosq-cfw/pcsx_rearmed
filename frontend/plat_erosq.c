@@ -14,6 +14,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <signal.h>
+#include <unistd.h>
 #include <sys/time.h>
 #include <ucontext.h>
 #include <linux/input.h>
@@ -156,13 +157,62 @@ static void get_layer_pos(int *x, int *y, int *w, int *h)
 	*x = 0; *y = 0; *w = PANEL_W; *h = PANEL_H;
 }
 
+/* ponytail: fatal-signal reporter. The launcher discards stderr and there is no
+ * gdb/coredump on-device, so a crash used to be a silent "drops back to the music
+ * UI". Print signal, fault address and PC, and say whether the PC is inside the
+ * mipsrec code cache (guest-code execution) or in our native code — that one bit
+ * splits a dynarec bug from a frontend bug. Also report which lifecycle phase we
+ * were in, since the menu<->emu transition is a known-suspect boundary. Binary is
+ * non-PIE, so PC == link address: symbolize offline with `nm pcsx`. */
+extern void mipsrec_code_range(uintptr_t *lo, uintptr_t *hi);
+volatile int g_erosq_phase;   /* 0=boot 1=emu 2=menu 3=leaving-menu */
+static void fault_sig(int sig, siginfo_t *si, void *ucv)
+{
+	ucontext_t *uc = (ucontext_t *)ucv;
+	uintptr_t pc = (uintptr_t)uc->uc_mcontext.pc;
+	uintptr_t lo = 0, hi = 0;
+	char buf[256];
+	int n;
+	mipsrec_code_range(&lo, &hi);
+	/* async-signal-safe: snprintf+write, no stdio locks */
+	n = snprintf(buf, sizeof buf,
+		"\n*** FATAL sig=%d code=%d addr=%p pc=%p ra=%p sp=%p phase=%d %s\n",
+		sig, si->si_code, si->si_addr, (void *)pc,
+		(void *)(uintptr_t)uc->uc_mcontext.gregs[31],
+		(void *)(uintptr_t)uc->uc_mcontext.gregs[29],
+		g_erosq_phase,
+		(pc >= lo && pc < hi) ? "IN-JIT" : "in-native");
+	if (n > 0) { ssize_t r = write(2, buf, n); (void)r; }
+	signal(sig, SIG_DFL);
+	raise(sig);
+}
+static void fault_init(void)
+{
+	static const int sigs[] = { SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT };
+	static char altstack[SIGSTKSZ < 16384 ? 16384 : SIGSTKSZ];
+	struct sigaction sa;
+	stack_t ss;
+	unsigned i;
+	/* SA_ONSTACK + sigaltstack: a stack-overflow SIGSEGV would otherwise fault
+	 * the handler too and we'd get no report at all -- the one crash mode where
+	 * the diagnostic matters most. */
+	ss.ss_sp = altstack;
+	ss.ss_size = sizeof altstack;
+	ss.ss_flags = 0;
+	sigaltstack(&ss, NULL);
+	memset(&sa, 0, sizeof sa);
+	sa.sa_sigaction = fault_sig;
+	sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+	for (i = 0; i < sizeof(sigs) / sizeof(sigs[0]); i++)
+		sigaction(sigs[i], &sa, NULL);
+}
+
 /* ponytail: EROSQ_SAMPLE=1 -> SIGPROF PC sampler (1kHz). Buckets each sample as
  * JIT (inside the mipsrec code cache = guest-code execution) vs native, and logs
  * native host PCs for offline nm symbolization (binary is non-PIE so PC == link
  * address). Answers "where does core time actually go" — GTE math / mem helpers /
  * emitted block bodies — before investing in any core-body optimization.
  * kill -USR2 dumps /media/sd/psx/samp.bin (serviced in the flip path, not signal ctx). */
-extern void mipsrec_code_range(uintptr_t *lo, uintptr_t *hi);
 static uintptr_t g_jit_lo, g_jit_hi;
 static volatile unsigned long g_smp_jit, g_smp_nat;
 #define SMP_MAX 262144
@@ -338,6 +388,7 @@ void plat_init(void)
 	}
 	drm_buf = drm_pixels(&drm_stride);
 
+	fault_init();
 	signal(SIGUSR1, shot_handler);   /* ponytail: kill -USR1 -> shot.ppm */
 	g_prof_on = getenv("EROSQ_PROF") ? 1 : 0;
 	sampler_init();
@@ -360,6 +411,7 @@ void plat_finish(void)
 
 void plat_gvideo_open(int is_pal)
 {
+	g_erosq_phase = 1;
 }
 
 void *plat_gvideo_set_mode(int *w, int *h, int *bpp)
@@ -404,6 +456,7 @@ void plat_gvideo_close(void)
 
 void plat_video_menu_enter(int is_rom_loaded)
 {
+	g_erosq_phase = 2;
 	pl_vout_buf = shadow_fb;
 }
 
@@ -424,6 +477,7 @@ void plat_video_menu_end(void)
 
 void plat_video_menu_leave(void)
 {
+	g_erosq_phase = 3;
 }
 
 void *plat_prepare_screenshot(int *w, int *h, int *bpp)

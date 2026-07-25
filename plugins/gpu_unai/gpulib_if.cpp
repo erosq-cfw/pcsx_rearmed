@@ -95,12 +95,20 @@ static void mxu_spans_init(void)
   mxu_spans_on = (e == NULL) || (atoi(e) != 0);
   e = getenv("EROSQ_PSKIP");
   pskip_on = (e == NULL) || (atoi(e) != 0);
+  e = getenv("EROSQ_PRELIGHT");
+  /* ponytail: A/B the flat-lit CLUT prelight. bit0=polys, bit1=sprites.
+   * The redirect trades the MXU *lit* span kernel for the scalar *unlit* one
+   * on polys (there is no MXU poly kernel for CF 0x020), while sprites gain
+   * the MXU unlit path -- so the two need separate A/B knobs. Default 3 = the
+   * shipped behaviour. */
+  prelight_mode = e ? atoi(e) : 3;
   e = getenv("EROSQ_GPU_HIST");
   if (e && atoi(e)) {
     gpu_hist_on = 1;
     signal(SIGUSR1, gpu_hist_dump);
   }
-  fprintf(stderr, "[gpu] MXU spans: %s\n", mxu_spans_on ? "on" : "off");
+  fprintf(stderr, "[gpu] MXU spans: %s  prelight_mode=%d\n",
+          mxu_spans_on ? "on" : "off", prelight_mode);
 }
 #else
 #define mxu_spans_init()
@@ -285,10 +293,12 @@ static inline bool need_lighting(u32 rgb_raw)
 // hottest kernel, and lit 4bpp sprites gain the MXU unlit sprite path).
 static le16_t prelit_clut[16];
 
-static inline void maybe_prelight_clut(u32 &driver_idx)
+static inline void maybe_prelight_clut(u32 &driver_idx, int which)
 {
   // need: LIGHT=1 (bit0), TEXTMODE=4bpp (bits5-6 == 1), GOURAUD=0 (bit7),
   // DITHER=0 (bit9); blend/mask bits stay free (unlit twins exist for all)
+  if (!(prelight_mode & which))
+    return;
   if ((driver_idx & 0x2e1) != 0x021)
     return;
   u32 bgr = le32_to_u32(gpu_unai.PacketBuffer.U4[0]) & 0xffffff;
@@ -298,7 +308,7 @@ static inline void maybe_prelight_clut(u32 &driver_idx)
   }
 }
 #else
-static inline void maybe_prelight_clut(u32 &) {}
+static inline void maybe_prelight_clut(u32 &, int) {}
 #endif
 
 static inline void textured_sprite(int &cpu_cycles_sum, int &cpu_cycles)
@@ -322,7 +332,7 @@ static inline void textured_sprite(int &cpu_cycles_sum, int &cpu_cycles)
   //  alone, I don't want to slow rendering down too much. (TODO)
   if (need_lighting(le32_raw(gpu_unai.PacketBuffer.U4[0])))
     driver_idx |= Lighting;
-  maybe_prelight_clut(driver_idx);
+  maybe_prelight_clut(driver_idx, 2);
   PS driver = gpuSpriteDrivers[driver_idx];
   PtrUnion packet = { .ptr = (void*)&gpu_unai.PacketBuffer };
   gpuDrawS(packet, driver, &w, &h);
@@ -402,7 +412,7 @@ int renderer_do_cmd_list(u32 *list_, int list_len, uint32_t *ex_regs,
             driver_idx |= Lighting;
         }
 
-        maybe_prelight_clut(driver_idx);
+        maybe_prelight_clut(driver_idx, 1);
         PP driver = gpuPolySpanDrivers[driver_idx];
         gpuDrawPolyFT(packet, driver, false);
         gput_sum(cpu_cycles_sum, cpu_cycles, gput_poly_base_t());
@@ -453,7 +463,7 @@ int renderer_do_cmd_list(u32 *list_, int list_len, uint32_t *ex_regs,
             driver_idx |= Lighting;
         }
 
-        maybe_prelight_clut(driver_idx);
+        maybe_prelight_clut(driver_idx, 1);
         PP driver = gpuPolySpanDrivers[driver_idx];
         gpuDrawPolyFT(packet, driver, true); // is_quad = true
         gput_sum(cpu_cycles_sum, cpu_cycles, gput_quad_base_t());
@@ -511,7 +521,7 @@ int renderer_do_cmd_list(u32 *list_, int list_len, uint32_t *ex_regs,
           dithering |
           Blending_Mode | gpu_unai.TEXT_MODE |
           gpu_unai.Masking | Blending | gouraud | lighting | gpu_unai.PixelMSB;
-        maybe_prelight_clut(driver_idx); // no-op unless flat-lit 4bpp
+        maybe_prelight_clut(driver_idx, 1); // no-op unless flat-lit 4bpp
         PP driver = gpuPolySpanDrivers[driver_idx];
         if (gouraud)
           gpuDrawPolyGT(packet, driver, false); // is_quad = true
@@ -582,7 +592,7 @@ int renderer_do_cmd_list(u32 *list_, int list_len, uint32_t *ex_regs,
           dithering |
           Blending_Mode | gpu_unai.TEXT_MODE |
           gpu_unai.Masking | Blending | gouraud | lighting | gpu_unai.PixelMSB;
-        maybe_prelight_clut(driver_idx); // no-op unless flat-lit 4bpp
+        maybe_prelight_clut(driver_idx, 1); // no-op unless flat-lit 4bpp
         PP driver = gpuPolySpanDrivers[driver_idx];
         if (gouraud)
           gpuDrawPolyGT(packet, driver, true); // is_quad = true

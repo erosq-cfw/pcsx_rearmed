@@ -694,9 +694,28 @@ static void recRecompile()
 	// Notify plugin_lib that we're recompiling (affects frameskip timing)
 	pl_dynarec_notify();
 
-	if (((uptr)recMem - (uptr)recMemBase) >= RECMEM_SIZE_MAX ) {
-		REC_LOG("Code cache size limit exceeded: flushing code cache.\n");
-		recReset();
+	/* ponytail: EROSQ_RECSTAT=1 reports how much code cache a game actually
+	 * uses and how often it wraps -- the two numbers needed to decide whether
+	 * RECMEM_SIZE (12MB) can be shrunk on a 24MB device. Diagnostic only. */
+	{
+		static int recstat = -1;
+		static unsigned long resets;
+		static size_t peak;
+		size_t used = (uptr)recMem - (uptr)recMemBase;
+		if (recstat < 0) recstat = getenv("EROSQ_RECSTAT") ? 1 : 0;
+		if (recstat && used > peak) {
+			peak = used;
+			if ((peak & ~0xfffffu) != ((peak - 1) & ~0xfffffu))   /* each new MB */
+				fprintf(stderr, "RECSTAT peak=%uKB resets=%lu\n",
+					(unsigned)(peak >> 10), resets);
+		}
+		if (used >= RECMEM_SIZE_MAX) {
+			resets++;
+			if (recstat)
+				fprintf(stderr, "RECSTAT cache full -> flush #%lu\n", resets);
+			REC_LOG("Code cache size limit exceeded: flushing code cache.\n");
+			recReset();
+		}
 	}
 
 	recMemStart = recMem;
@@ -788,14 +807,18 @@ static int recInit()
 
 	recMem = (u32*)recMemBase;
 
-	// Init code buffer, to allocate the RAM we need in advance. Filling with
-	//  all-1's should force an exception on any accidental non-code execution.
-	{
-		size_t fill_size = RECMEM_SIZE_MAX + 0x1000;  // 4KB past 'maximum' we'd ever use.
-		if (fill_size > RECMEM_SIZE)
-			fill_size = RECMEM_SIZE;
-		memset(recMemBase, 0xff, fill_size);
-	}
+	/* ponytail: the upstream pcsx4all code did
+	 *     memset(recMemBase, 0xff, RECMEM_SIZE_MAX + 0x1000);
+	 * here, to "allocate the RAM we need in advance" and to make an accidental
+	 * jump into not-yet-emitted cache trap on an illegal opcode. On this 24MB
+	 * device that prefault is actively harmful: it dirties 11.5MB of BSS at
+	 * startup, all of which lands in the 16MB zram swap and stays there for the
+	 * process's life (measured: VmSwap 12MB, MemAvailable pinned at 0 with GT2
+	 * loaded, which is one allocation away from an OOM kill). Left as demand-zero
+	 * the cache costs only what the recompiler actually emits.
+	 * The 0xff trap property is not worth 11.5MB here, and it was already only
+	 * half-true: recReset() rewinds recMem without refilling, so after the first
+	 * cache wrap the tail holds stale code rather than 0xff anyway. */
 
 	// The tables recRAM and recROM hold block code pointers for all valid PC
 	//  values for a PS1 program, after masking away banking and/or mirroring.
