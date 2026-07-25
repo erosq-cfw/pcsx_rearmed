@@ -262,10 +262,27 @@ static const struct cspace_func_type {
 	void (*blit)(void *dst, const void *src, int dst_pixels);
 	void (*blit_dscale640)(void *dst, const void *src, int dst_pixels);
 	void (*blit_dscale512)(void *dst, const void *src, int dst_pixels);
+	/* EROSQ scale_hires>=2: average source columns instead of dropping 3 of
+	 * every 8, and (the _avg2 column) also average the two interlace fields.
+	 * 16bpp only -- the bgr888 (FMV) rows reuse the plain nearest variants. */
+	void (*blit_dscale640_avg)(void *dst, const void *src, int dst_pixels);
+	void (*blit_dscale512_avg)(void *dst, const void *src, int dst_pixels);
+	void (*blit_dscale640_avg2)(void *dst, const void *src, int dst_pixels);
+	void (*blit_dscale512_avg2)(void *dst, const void *src, int dst_pixels);
+	void (*blit_avg2)(void *dst, const void *src, int dst_pixels);
 } cspace_funcs[] = {
-	{ bgr555_to_rgb565, bgr555_to_rgb565_640_to_320, bgr555_to_rgb565_512_to_320 },
-	{ bgr888_to_rgb888, bgr888_to_rgb888_640_to_320, bgr888_to_rgb888_512_to_320 },
-	{ bgr888_to_rgb565, bgr888_to_rgb565_640_to_320, bgr888_to_rgb565_512_to_320 },
+	{ bgr555_to_rgb565, bgr555_to_rgb565_640_to_320, bgr555_to_rgb565_512_to_320,
+	  bgr555_to_rgb565_640_to_320_avg,  bgr555_to_rgb565_512_to_320_avg,
+	  bgr555_to_rgb565_640_to_320_avg2, bgr555_to_rgb565_512_to_320_avg2,
+	  bgr555_to_rgb565_avg2 },
+	{ bgr888_to_rgb888, bgr888_to_rgb888_640_to_320, bgr888_to_rgb888_512_to_320,
+	  bgr888_to_rgb888_640_to_320, bgr888_to_rgb888_512_to_320,
+	  bgr888_to_rgb888_640_to_320, bgr888_to_rgb888_512_to_320,
+	  bgr888_to_rgb888 },
+	{ bgr888_to_rgb565, bgr888_to_rgb565_640_to_320, bgr888_to_rgb565_512_to_320,
+	  bgr888_to_rgb565_640_to_320, bgr888_to_rgb565_512_to_320,
+	  bgr888_to_rgb565_640_to_320, bgr888_to_rgb565_512_to_320,
+	  bgr888_to_rgb565 },
 };
 
 // XXX: this is platform specific really
@@ -300,14 +317,27 @@ static void pl_vout_set_mode(int w, int h, int raw_w, int raw_h, int bpp)
 	}
 	pl_rearmed_cbs.cspace_blit = cspace_f->blit;
 	if (pl_rearmed_cbs.scale_hires) {
+		/* EROSQ: 1 = "Fast" (drop columns / one field, the historical path),
+		 * 2 = "Sharp" (average columns), 3 = "Sharp+" (also average the two
+		 * fields -- only meaningful when there are two rows per output row,
+		 * i.e. an interlaced source that gets halved below). */
+		int avg = pl_rearmed_cbs.scale_hires >= 2;
+		int avg2 = pl_rearmed_cbs.scale_hires >= 3 && vout_h > 256;
+
 		if (raw_w >= 640-4) {
-			pl_rearmed_cbs.cspace_blit = cspace_f->blit_dscale640;
+			pl_rearmed_cbs.cspace_blit = avg2 ? cspace_f->blit_dscale640_avg2
+					   : avg ? cspace_f->blit_dscale640_avg
+						 : cspace_f->blit_dscale640;
 			vout_w = 320;
 		}
 		else if (raw_w >= 512-4) {
-			pl_rearmed_cbs.cspace_blit = cspace_f->blit_dscale512;
+			pl_rearmed_cbs.cspace_blit = avg2 ? cspace_f->blit_dscale512_avg2
+					   : avg ? cspace_f->blit_dscale512_avg
+						 : cspace_f->blit_dscale512;
 			vout_w = 320;
 		}
+		else if (avg2)
+			pl_rearmed_cbs.cspace_blit = cspace_f->blit_avg2;
 		if (vout_h > 256)
 			vout_h /= 2;
 	}

@@ -366,11 +366,21 @@ static void menu_set_defconfig(void)
 	frameskip = 1; // 1 - off
 #endif
 #ifdef EROSQ
-	/* Render only the visible field of interlaced/hi-res modes (480i -> 240).
-	 * The 320x240 panel discards the other field anyway, so this halves GPU
-	 * fill on hi-res games (e.g. GT2 42->58 vsps) with no visible change and
-	 * no effect on progressive games. */
-	pl_rearmed_cbs.scale_hires = 1;
+	/* 2 = "Sharp": downscale hi-res modes to the 320x240 panel by AVERAGING
+	 * source columns, and render only the visible field of interlaced modes
+	 * (480i -> 240; the panel discards the other field anyway, which is what
+	 * halves GPU fill on hi-res games -- GT2 42->58 vsps -- with no effect on
+	 * progressive games).
+	 * Was 1 ("Fast"), which picked one source column per output pixel and so
+	 * DROPPED 3 of every 8 in 512 mode. Games that switch to a hi-res mode to
+	 * draw text (GT2's 512x480 dealership/menu screens) draw 1-pixel-wide glyph
+	 * stems, so a dropped column deletes a stem and letters change identity
+	 * ("firm" -> "flnm"). Averaging measured FREE -- Spyro's fill-heavy 512-wide
+	 * intro: median 60.0 both, gpu 35%->36%; GT2 menu: gpu 28%->23% (pskip's
+	 * per-span overhead exceeded what it saved) -- so it is the better default.
+	 * 3 ("Sharp+") additionally averages both interlace fields, which needs both
+	 * rasterized: -20% on 480i gameplay (Tekken 3 46.0 -> 36.7), so not default. */
+	pl_rearmed_cbs.scale_hires = 2;
 #endif
 	analog_deadzone = 50;
 	soft_scaling = 1;
@@ -1335,7 +1345,17 @@ static const char h_cscaler[]   = "Displays the scaler layer, you can resize it\
 static const char h_soft_filter[] = "Works only if game uses low resolution modes";
 static const char h_gamma[]     = "Gamma/brightness adjustment (default 100)";
 static const char h_lowres[]    = "Forces all PSX high resolutions to 320x240 or lower\n"
+#ifdef EROSQ
+				  "Fast:   skip lines and pixels (fastest, thin text\n"
+				  "        can lose whole strokes -- e.g. GT2 menus)\n"
+				  "Sharp:  average pixels instead of dropping them\n"
+				  "        (readable text, small GPU cost)\n"
+				  "Sharp+: also average both interlace fields\n"
+				  "        (sharpest, ~2x GPU fill on hi-res screens)";
+static const char *men_hires[] = { "Off", "Fast", "Sharp", "Sharp+", NULL };
+#else
 				  "by skipping lines and pixels";
+#endif
 #ifdef HAVE_NEON32
 static const char *men_scanlines[] = { "OFF", "1", "2", "3", NULL };
 static const char h_scanline_l[]  = "Scanline brightness, 0-100%";
@@ -1440,7 +1460,11 @@ static menu_entry e_menu_gfx_options[] =
 	mee_range_h   ("Gamma adjustment",         MA_OPT_GAMMA, g_gamma, 1, 200, h_gamma),
 	mee_onoff     ("OpenGL Vsync",             MA_OPT_VSYNC, g_opts, OPT_VSYNC),
 	mee_cust_h    ("Setup custom scaler",      MA_OPT_VARSCALER_C, menu_loop_cscaler, NULL, h_cscaler),
+#ifdef EROSQ
+	mee_enum_h    ("Hi-res downscale",         0, menu_iopts[0], men_hires, h_lowres),
+#else
 	mee_onoff_h   ("Force low resolution",     0, menu_iopts[0], 1, h_lowres),
+#endif
 	mee_end,
 };
 

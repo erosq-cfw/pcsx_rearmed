@@ -1229,7 +1229,10 @@ void GPUrearmedCallbacks(const struct rearmed_cbs *cbs)
   gpu.state.allow_interlace = cbs->gpu_neon.allow_interlace;
   gpu.state.enhancement_enable = cbs->gpu_neon.enhancement_enable;
   gpu.state.enhancement_active = 0;
-  gpu.state.downscale_enable = cbs->scale_hires;
+  /* EROSQ: scale_hires is now 0..3 (off / fast / sharp / sharp+), and this is
+   * a 1-bit bitfield -- assigning 2 would store 0 and silently disable the
+   * field skip. The mode itself reaches the renderer via renderer_set_config. */
+  gpu.state.downscale_enable = !!cbs->scale_hires;
   gpu.state.use_alternative_flip = cbs->alt_flip;
   gpu.state.screen_centering_type_default = cbs->screen_centering_type_default;
   if (gpu.state.screen_centering_type != cbs->screen_centering_type

@@ -28,6 +28,14 @@ void bgr888_to_rgb888_512_to_320(void *dst, const void *src, int dst_pixels);
 void bgr555_to_xrgb8888_512_to_320(void *dst, const void *src, int dst_pixels);
 void bgr888_to_xrgb8888_512_to_320(void *dst, const void *src, int dst_pixels);
 
+/* EROSQ: averaging hi-res downscalers (scale_hires 2 = "Sharp", 3 = "Sharp+").
+ * _avg2 also averages the two source rows and so needs both fields rendered. */
+void bgr555_to_rgb565_512_to_320_avg(void *dst, const void *src, int dst_pixels);
+void bgr555_to_rgb565_512_to_320_avg2(void *dst, const void *src, int dst_pixels);
+void bgr555_to_rgb565_640_to_320_avg(void *dst, const void *src, int dst_pixels);
+void bgr555_to_rgb565_640_to_320_avg2(void *dst, const void *src, int dst_pixels);
+void bgr555_to_rgb565_avg2(void *dst, const void *src, int pixels);
+
 void bgr_to_uyvy_init(void);
 void rgb565_to_uyvy(void *d, const void *s, int pixels);
 void bgr555_to_uyvy(void *d, const void *s, int pixels, int x2);

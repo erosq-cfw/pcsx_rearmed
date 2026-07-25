@@ -20,9 +20,11 @@
 
 #if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
 #define SWAP16(x) __builtin_bswap16(x)
+#define LE16TOH(x) SWAP16(x)
 #define LE16TOHx2(x) ((SWAP16((x) >> 16) << 16) | SWAP16(x))
 #define LE32TOH(x) __builtin_bswap32(x)
 #else
+#define LE16TOH(x) (x)
 #define LE16TOHx2(x) (x)
 #define LE32TOH(x) (x)
 #endif
@@ -488,6 +490,122 @@ void bgr888_to_xrgb8888_512_to_320(void * __restrict__ dst_,
 		dst[3] = bgr888_to_xrgb8888_one(src + 5*3);
 		dst[4] = bgr888_to_xrgb8888_one(src + 7*3);
 	}
+}
+
+/* ---- EROSQ: averaging hi-res downscalers -------------------------------- */
+/*
+ * The nearest-neighbour downscalers above pick ONE source column per output
+ * pixel, so in 512 mode 3 of every 8 columns are discarded entirely. Games
+ * that switch to a hi-res mode specifically to draw text (Gran Turismo 2's
+ * dealership/menu screens are 512x480) draw glyph stems one source pixel
+ * wide, so a discarded column does not dim a stem -- it deletes it, and
+ * letters change identity ("firm" -> "flnm"). These variants average instead,
+ * so every source column contributes to some output pixel.
+ *
+ * Selected by scale_hires >= 2 (see menu.c / plugin_lib.c pl_vout_set_mode):
+ *   2 "Sharp"  -> _avg  : average columns; still one interlace field.
+ *   3 "Sharp+" -> _avg2 : also average the two source rows of each output
+ *                         row, which requires the renderer to draw BOTH
+ *                         fields (gpulib_if.cpp renderer_notify_screen_change).
+ * The _avg2 forms read src[i] and src[i + 1024]; pl_vout_flip already walks
+ * two VRAM rows per output row in this mode (sstride 4096), and the deepest
+ * row touched is still inside the display area, so no extra clamping.
+ *
+ * 16bpp (bgr555) only -- 24bpp is FMV, where this does not matter and motion
+ * hides it; the cspace table points the bgr888 rows at the plain variants.
+ */
+
+/* exact per-channel floor((a+b)/2) for two packed bgr555 pixels.
+ * 0x7bde7bde clears each 5-bit channel's LSB before the shift so no channel
+ * carries into the next; ((x^y)>>1) + (x&y) == floor((x+y)/2) per channel.
+ * Per-channel results are <= 31, so nothing carries out of bit15 either. */
+static inline uint32_t avg555x2(uint32_t a, uint32_t b)
+{
+	return (((a ^ b) & 0x7bde7bde) >> 1) + (a & b);
+}
+
+/* 16 source columns -> 10 output pixels (the 8:5 ratio, doubled to keep dst
+ * word-aligned). Output j samples source floor(j*1.6) and the column after
+ * it; across a group that covers all 16 columns exactly once or twice. */
+static const unsigned char avg512_off[10] = { 0, 1, 3, 4, 6, 8, 9, 11, 12, 14 };
+
+#define AVG_PAIR(s, k) \
+	avg555x2((uint32_t)LE16TOH((s)[avg512_off[2*(k)]]) | \
+	         ((uint32_t)LE16TOH((s)[avg512_off[2*(k)+1]]) << 16), \
+	         (uint32_t)LE16TOH((s)[avg512_off[2*(k)] + 1]) | \
+	         ((uint32_t)LE16TOH((s)[avg512_off[2*(k)+1] + 1]) << 16))
+
+void bgr555_to_rgb565_512_to_320_avg(void * __restrict__ dst_,
+	const void * __restrict__ src_, int dpixels)
+{
+	const uint16_t * __restrict__ src = src_;
+	uint32_t * __restrict__ dst = dst_;
+	int k;
+
+	for (; dpixels >= 10; dpixels -= 10, src += 16, dst += 5)
+		for (k = 0; k < 5; k++)
+			dst[k] = bgr555_to_rgb565_pair(AVG_PAIR(src, k));
+}
+
+void bgr555_to_rgb565_512_to_320_avg2(void * __restrict__ dst_,
+	const void * __restrict__ src_, int dpixels)
+{
+	const uint16_t * __restrict__ src = src_;
+	uint32_t * __restrict__ dst = dst_;
+	int k;
+
+	for (; dpixels >= 10; dpixels -= 10, src += 16, dst += 5)
+		for (k = 0; k < 5; k++)
+			dst[k] = bgr555_to_rgb565_pair(
+				avg555x2(AVG_PAIR(src, k), AVG_PAIR(src + 1024, k)));
+}
+
+#undef AVG_PAIR
+
+/* 640 -> 320 is a clean 2:1, so this is an exact box filter. */
+void bgr555_to_rgb565_640_to_320_avg(void * __restrict__ dst_,
+	const void * __restrict__ src_, int dpixels)
+{
+	const uint32_t * __restrict__ src = (const void *)((intptr_t)src_ & ~3);
+	uint32_t * __restrict__ dst = dst_;
+
+	for (; dpixels >= 2; dpixels -= 2, src += 2, dst += 1) {
+		uint32_t p0 = LE16TOHx2(src[0]), p1 = LE16TOHx2(src[1]);
+		/* p0 = (s1<<16)|s0, p1 = (s3<<16)|s2 -> out (avg(s2,s3) << 16) | avg(s0,s1) */
+		uint32_t lo = avg555x2(p0, p0 >> 16) & 0xffff;
+		uint32_t hi = avg555x2(p1, p1 >> 16) & 0xffff;
+		dst[0] = bgr555_to_rgb565_pair(lo | (hi << 16));
+	}
+}
+
+void bgr555_to_rgb565_640_to_320_avg2(void * __restrict__ dst_,
+	const void * __restrict__ src_, int dpixels)
+{
+	const uint32_t * __restrict__ src = (const void *)((intptr_t)src_ & ~3);
+	uint32_t * __restrict__ dst = dst_;
+
+	for (; dpixels >= 2; dpixels -= 2, src += 2, dst += 1) {
+		uint32_t a0 = LE16TOHx2(src[0]),     a1 = LE16TOHx2(src[1]);
+		uint32_t b0 = LE16TOHx2(src[512]),   b1 = LE16TOHx2(src[513]);
+		uint32_t lo = avg555x2(avg555x2(a0, a0 >> 16),
+				       avg555x2(b0, b0 >> 16)) & 0xffff;
+		uint32_t hi = avg555x2(avg555x2(a1, a1 >> 16),
+				       avg555x2(b1, b1 >> 16)) & 0xffff;
+		dst[0] = bgr555_to_rgb565_pair(lo | (hi << 16));
+	}
+}
+
+/* No horizontal change (source is already <= panel width, e.g. GT2's 368x480
+ * and 320x480 screens), vertical field pair averaged. scale_hires == 3 only. */
+void bgr555_to_rgb565_avg2(void * __restrict__ dst_,
+	const void * __restrict__ src_, int pixels)
+{
+	const uint32_t * __restrict__ src = (const void *)((intptr_t)src_ & ~3);
+	uint32_t x, * __restrict__ dst = dst_;
+
+	for (x = 0; x < pixels / 2; x++)
+		dst[x] = bgr555_to_rgb565_pair(
+			avg555x2(LE16TOHx2(src[x]), LE16TOHx2(src[x + 512])));
 }
 
 /* YUV stuff */

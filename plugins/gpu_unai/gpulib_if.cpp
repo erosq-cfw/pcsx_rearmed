@@ -164,11 +164,21 @@ void renderer_finish(void)
 {
 }
 
+/* EROSQ: mirror of pl_rearmed_cbs.scale_hires (0 off / 1 fast / 2 sharp /
+ * 3 sharp+). gpu.state.downscale_enable is a 1-bit bitfield so it cannot carry
+ * the mode. Defaults to 1 = the historical behaviour, for the window before
+ * renderer_set_config() first runs. Declared outside the MXU guard because the
+ * interlace decision below is not MXU-specific. */
+static int hires_mode = 1;
+
 void renderer_notify_screen_change(const struct psx_gpu_screen *screen)
 {
   gpu_unai.inn.ilace_mask = gpu_unai.config.ilace_force;
 
-  if (gpu.state.downscale_enable)
+  /* hires_mode 3 ("Sharp+") averages the two interlace fields in the cspace
+   * blit, so both fields have to actually be rasterized -- skip the field-skip
+   * that modes 1 and 2 rely on. This is the expensive half of the option. */
+  if (gpu.state.downscale_enable && hires_mode < 3)
   {
     gpu_unai.inn.ilace_mask |= !!(gpu.status & PSX_GPU_STATUS_INTERLACE);
   }
@@ -190,8 +200,10 @@ void renderer_notify_screen_change(const struct psx_gpu_screen *screen)
    * clean 2:1 — both samplers take the even columns, so skip odds 0xaa either
    * way. Mask phase is (vram_column & 7): require an 8-aligned display start;
    * games reading VRAM back for fb effects can kill it via EROSQ_PSKIP=0. */
+  /* hires_mode >= 2 uses the averaging downscalers, which read every source
+   * column -- a skipped column would leave stale VRAM in the average. */
   u32 m = 0;
-  if (pskip_on && !(screen->src_x & 7)) {
+  if (pskip_on && hires_mode < 2 && !(screen->src_x & 7)) {
     if (screen->hres == 512)      m = gpu.state.downscale_enable ? 0x4a : 0xa4;
     else if (screen->hres == 640) m = 0xaa;
   }
@@ -837,6 +849,7 @@ void renderer_set_config(const struct rearmed_cbs *cbs)
   gpu_unai.config.blending      = cbs->gpu_unai.blending;
   gpu_unai.config.dithering     = cbs->dithering != 0;
   gpu_unai.config.force_dithering = cbs->dithering >> 1;
+  hires_mode                    = cbs->scale_hires;
 
   renderer_notify_screen_change(&gpu.screen);
   oldunai_renderer_set_config(cbs);
