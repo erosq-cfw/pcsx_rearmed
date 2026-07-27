@@ -696,6 +696,29 @@ static void update_analog_nub_adjust(int *x_, int *y_)
 	#undef d
 }
 
+#ifdef EROSQ
+/* in_probe() compacts its device table, so a device id can change when some
+ * other device goes away. in_adev[] holds ids, and a stale one silently points
+ * the analog sticks at the wrong device (or at nothing), so re-resolve them by
+ * name across the re-probe. */
+static void erosq_reprobe(void)
+{
+	char names[2][256];
+	int i;
+
+	for (i = 0; i < 2; i++) {
+		const char *n = in_get_dev_name(in_adev[i], 0, 0);
+		snprintf(names[i], sizeof(names[i]), "%s", n != NULL ? n : "");
+	}
+
+	in_probe();
+
+	for (i = 0; i < 2; i++)
+		if (names[i][0] != 0)
+			in_adev[i] = in_name_to_id(names[i]);
+}
+#endif
+
 static void update_analogs(void)
 {
 	int *nubp[2] = { in_analog_left[0], in_analog_right[0] };
@@ -753,7 +776,7 @@ static void update_input(void)
 	 * emulator is restarted. Deliberately after in_update(), not inside the
 	 * driver: in_probe() frees the driver data that loop is walking. */
 	if (in_evdev_hotplug_check())
-		in_probe();
+		erosq_reprobe();
 #endif
 	if (in_type[0] == PSE_PAD_TYPE_ANALOGJOY || in_type[0] == PSE_PAD_TYPE_ANALOGPAD)
 		update_analogs();

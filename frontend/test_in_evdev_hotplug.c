@@ -89,11 +89,20 @@ static void test_scan_mask(void)
 {
 	unsigned int m;
 
-	node_add("event0"); node_add("event3"); node_add("event12");
+	/* Bogus names FIRST and on their own. An earlier version of this test
+	 * added event0 alongside them, so bit 0 was set either way and the
+	 * "event" case below could not fail -- strtoul("") returns 0 and leaves
+	 * *end == 0, which passed the parse and set bit 0 for a digit-less name. */
 	node_add("mouse0"); node_add("mice"); node_add("js0");
 	node_add("event");        /* no number       -> ignore */
 	node_add("eventX");       /* not a number    -> ignore */
 	node_add("event2x");      /* trailing junk   -> ignore */
+	node_add("event+3");      /* strtoul eats a sign -> ignore */
+	node_add("event32");      /* past the mask width -> ignore */
+	m = scan_node_mask(test_dir);
+	check(m == 0, "bogus names must set no bits, got 0x%x", m);
+
+	node_add("event0"); node_add("event3"); node_add("event12");
 	m = scan_node_mask(test_dir);
 	check(m == ((1u << 0) | (1u << 3) | (1u << 12)), "got 0x%x", m);
 
@@ -107,6 +116,60 @@ static void test_scan_mask(void)
 	node_del("event0"); node_del("event12"); node_del("mouse0");
 	node_del("mice"); node_del("js0"); node_del("event");
 	node_del("eventX"); node_del("event2x");
+	node_del("event+3"); node_del("event32");
+}
+
+/* ---- 1b. enumeration must not stop at a hole ------------------------------
+ * A disconnect leaves /dev/input/eventN missing while higher-numbered nodes
+ * still exist. in_evdev_probe() used to break out of its scan on the first
+ * open() failure, so a re-probe triggered by that very disconnect enumerated
+ * nothing past the hole and left every higher device closed and dead.
+ *
+ * The fake nodes are plain files, so the first ioctl on them fails and the
+ * probe skips them -- but it prints the path it was working on first, and that
+ * printout is the evidence of which nodes it actually visited. */
+static char probe_log[8192];
+
+static void run_probe_capture(void)
+{
+	static const in_drv_t drv;
+	char path[128];
+	int saved, fd, n;
+
+	snprintf(path, sizeof path, "%s.probelog", dir_buf);
+	fd = open(path, O_CREAT | O_TRUNC | O_RDWR, 0600);
+	check(fd >= 0, "cannot open %s", path);
+
+	fflush(stdout);
+	saved = dup(STDOUT_FILENO);
+	dup2(fd, STDOUT_FILENO);
+	in_evdev_probe(&drv);
+	fflush(stdout);
+	dup2(saved, STDOUT_FILENO);
+	close(saved);
+
+	lseek(fd, 0, SEEK_SET);
+	n = read(fd, probe_log, sizeof probe_log - 1);
+	probe_log[n > 0 ? n : 0] = 0;
+	close(fd);
+	unlink(path);
+}
+
+static void test_probe_skips_holes(void)
+{
+	node_add("event0");
+	node_add("event2");   /* hole at event1, as a disconnect leaves behind */
+	node_add("event5");
+
+	run_probe_capture();
+	check(strstr(probe_log, "event0") != NULL, "event0 not visited");
+	check(strstr(probe_log, "event2") != NULL,
+		"enumeration stopped at the hole: event2 never visited");
+	check(strstr(probe_log, "event5") != NULL,
+		"enumeration stopped at a hole: event5 never visited");
+	printf("  probe enumerates past a missing node                    OK\n");
+
+	node_del("event0"); node_del("event2"); node_del("event5");
 }
 
 /* ---- 2. change detection + rate limit ------------------------------------ */
@@ -216,6 +279,7 @@ int main(void)
 	fake_ms = CLOCK_START;
 	fs_init();
 	test_scan_mask();
+	test_probe_skips_holes();
 	test_change_detect();
 	test_dev_gone();
 	test_reconnect_same_node();
