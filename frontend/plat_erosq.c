@@ -395,7 +395,7 @@ void plat_init(void)
 	gov_pin_performance();
 
 	in_evdev_init(&erosq_evdev_pdata);
-	in_probe();
+	pl_reprobe_input();
 
 	pl_rearmed_cbs.only_16bpp = 1;
 	pl_rearmed_cbs.pl_get_layer_pos = get_layer_pos;

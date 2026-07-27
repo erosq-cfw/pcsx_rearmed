@@ -697,11 +697,43 @@ static void update_analog_nub_adjust(int *x_, int *y_)
 }
 
 #ifdef EROSQ
+/* Wire the pad's stick to the left analog stick. Nothing else does: in_adev[]
+ * is only ever set from a "bind_analog" line in pcsx.cfg, which appears only
+ * after a trip through the Analog controls menu, so out of the box the sticks
+ * are dead and Ape Escape and friends are unplayable. Default it to the first
+ * probed device that actually has axes.
+ *
+ * Then stop that device reporting its stick as arrow keys, or the stick would
+ * drive the d-pad at the same time as the analog axes and games would see
+ * doubled input. Only the stick is switched off: the pad's d-pad arrives as
+ * ABS_HAT0X/Y, which in_evdev keeps converting. Both settings live in the
+ * driver's per-device data, which in_probe() recreates, so this has to run
+ * again after every probe. */
+static void erosq_bind_analog(void)
+{
+	int i, count;
+
+	if (in_adev[0] < 0) {
+		for (i = 0; i < IN_MAX_DEVS; i++) {
+			if (in_get_config(i, IN_CFG_ABS_AXIS_COUNT, &count) == 0
+			    && count >= 2) {
+				in_adev[0] = i;
+				break;
+			}
+		}
+	}
+
+	if (in_adev[0] >= 0)
+		in_set_config_int(in_adev[0], IN_CFG_ANALOG_MAP_ULDR, 0);
+}
+
 /* in_probe() compacts its device table, so a device id can change when some
  * other device goes away. in_adev[] holds ids, and a stale one silently points
  * the analog sticks at the wrong device (or at nothing), so re-resolve them by
- * name across the re-probe. */
-static void erosq_reprobe(void)
+ * name across the re-probe. Every in_probe() call site goes through here --
+ * including the menu's "Rescan devices", which is the workaround users get
+ * pointed at and which would otherwise break the sticks it is meant to fix. */
+void pl_reprobe_input(void)
 {
 	char names[2][256];
 	int i;
@@ -714,8 +746,9 @@ static void erosq_reprobe(void)
 	in_probe();
 
 	for (i = 0; i < 2; i++)
-		if (names[i][0] != 0)
-			in_adev[i] = in_name_to_id(names[i]);
+		in_adev[i] = names[i][0] != 0 ? in_name_to_id(names[i]) : -1;
+
+	erosq_bind_analog();
 }
 #endif
 
@@ -776,7 +809,7 @@ static void update_input(void)
 	 * emulator is restarted. Deliberately after in_update(), not inside the
 	 * driver: in_probe() frees the driver data that loop is walking. */
 	if (in_evdev_hotplug_check())
-		erosq_reprobe();
+		pl_reprobe_input();
 #endif
 	if (in_type[0] == PSE_PAD_TYPE_ANALOGJOY || in_type[0] == PSE_PAD_TYPE_ANALOGPAD)
 		update_analogs();

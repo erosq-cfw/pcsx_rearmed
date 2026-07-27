@@ -336,7 +336,7 @@ static void menu_sync_config(void)
 	default: in_type[1] = PSE_PAD_TYPE_STANDARD;
 	}
 	if (in_evdev_allow_abs_only != allow_abs_only_old) {
-		in_probe();
+		pl_reprobe_input();
 		allow_abs_only_old = in_evdev_allow_abs_only;
 	}
 	if (in_type[0] != in_type_old[0] || in_type[1] != in_type_old[1])
@@ -395,7 +395,14 @@ static void menu_set_defconfig(void)
 	psx_clock = DEFAULT_PSX_CLOCK;
 
 	region = 0;
+#ifdef EROSQ
+	/* 1 = analog pad. The BT pad has a stick and erosq_bind_analog() wires it
+	 * up by default, so ship as a DualShock rather than a digital pad. */
+	in_type_sel1 = 1;
+	in_type_sel2 = 0;
+#else
 	in_type_sel1 = in_type_sel2 = 0;
+#endif
 	in_evdev_allow_abs_only = 0;
 
 	menu_sync_config();
@@ -1267,7 +1274,7 @@ static int mh_savecfg(int id, int keys)
 static int mh_input_rescan(int id, int keys)
 {
 	//menu_sync_config();
-	in_probe();
+	pl_reprobe_input();
 	menu_update_msg("rescan complete.");
 
 	return 0;

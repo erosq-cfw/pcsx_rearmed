@@ -29,6 +29,11 @@ extern int in_mouse[8][2];
 
 extern int in_adev[2], in_adev_axis[2][2];
 extern int in_adev_is_nublike[2];
+/* re-probe input devices AND keep in_adev[]/the analog mapping correct across
+ * the renumbering in_probe() does; use instead of a bare in_probe(). Defined
+ * only in the EROSQ build; declared unconditionally because plat_erosq.c calls
+ * it and is not built with -DEROSQ. */
+void pl_reprobe_input(void);
 extern int in_enable_vibration;
 
 extern void *pl_vout_buf;
