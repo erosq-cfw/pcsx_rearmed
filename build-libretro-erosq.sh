@@ -2,7 +2,7 @@
 # Milestone-1 proving build: pcsx_rearmed libretro core for EROSQ (X1000 mipsel musl).
 # Real core + Lightrec + gpu_unai, no SDL/plat. Headless loader drives it on-device.
 set -e
-export PATH=buildroot-2026.05/output/host/bin:$PATH
+export PATH=buildroot-2026.08/output/host/bin:$PATH
 cd pcsx_rearmed
 
 TC=mipsel-buildroot-linux-musl

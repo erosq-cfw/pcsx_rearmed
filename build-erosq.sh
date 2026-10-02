@@ -5,7 +5,7 @@
 # Two 2026-07 ships silently lost the PGO layout by using this script.
 echo "NOTE: dev build (no PGO). Ship via build-erosq-pgo.sh." >&2
 set -e
-export PATH=buildroot-2026.05/output/host/bin:$PATH
+export PATH=buildroot-2026.08/output/host/bin:$PATH
 cd pcsx_rearmed
 
 TC=mipsel-buildroot-linux-musl

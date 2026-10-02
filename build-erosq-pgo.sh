@@ -8,7 +8,7 @@
 # under gcov instrumentation), then applied to the dynarec build. -fprofile-
 # partial-training keeps the unprofiled dynarec TUs from being pessimized.
 set -e
-export PATH=buildroot-2026.05/output/host/bin:$PATH
+export PATH=buildroot-2026.08/output/host/bin:$PATH
 cd "$(dirname "$0")"
 
 PROF="$(pwd)/pgo-profile"
