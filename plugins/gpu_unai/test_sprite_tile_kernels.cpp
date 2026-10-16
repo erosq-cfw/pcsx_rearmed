@@ -69,6 +69,13 @@ static int host_raw_op_hit = 0;
 #include "gpu_unai.h"
 #include "gpu_fixedpoint.h"
 #include "gpu_inner.h"
+/* gpuClearImage pref-30 path: the stub POISONS the line (worst-case
+ * PrepareForStore semantics) -- any line the clear does not overwrite whole
+ * then mismatches the independently computed expected fill. */
+static int pref_calls, pref_misaligned;
+#define GPU_PREF_STORE(p) do { pref_calls++; if ((uintptr_t)(p) & 31) pref_misaligned++; \
+	memset((void *)(p), 0xEE, 32); } while (0)
+#include "gpu_raster_image.h"
 
 /* deterministic PRNG (no libc rand variance across hosts) */
 static u32 rng_state = 0x2026'0716;
@@ -216,6 +223,39 @@ static void run_tile_case(const char *name, int trial)
 	}
 }
 
+/* VRAM-sized, page-aligned buffer like gpulib's */
+static le16_t vram_t[FRAME_WIDTH * FRAME_HEIGHT] __attribute__((aligned(4096)));
+static u16 expect_t[FRAME_WIDTH * FRAME_HEIGHT];
+static void run_clear_case(int trial)
+{
+	for (int i = 0; i < FRAME_WIDTH * FRAME_HEIGHT; i++)
+		expect_t[i] = (u16)rnd(), vram_t[i] = u16_to_le16(expect_t[i]);
+	gpu_unai.vram = vram_t;
+	le32_t pk[4];
+	s32 x = (s32)(rnd() % 1100) - 40, y = (s32)(rnd() % 560) - 30;
+	s32 w = rnd() % 1024, h = rnd() % 512;
+	u32 col = rnd() & 0xffffff;
+	pk[0] = u32_to_le32(col);
+	pk[1] = u32_to_le32((u32)(u16)x | ((u32)(u16)y << 16));
+	pk[2] = u32_to_le32((u32)(u16)w | ((u32)(u16)h << 16));
+	PtrUnion packet = { .ptr = (void *)pk };
+	/* expected: same clipping rules, plain per-pixel fill */
+	s32 x0 = x & ~0xF, w0 = ((w & 0x3ff) + 0xF) & ~0xF, y0 = y, h0 = h & 0x1ff;
+	w0 += x0; if (x0 < 0) x0 = 0; if (w0 > FRAME_WIDTH) w0 = FRAME_WIDTH; w0 -= x0;
+	h0 += y0; if (y0 < 0) y0 = 0; if (h0 > FRAME_HEIGHT) h0 = FRAME_HEIGHT; h0 -= y0;
+	u16 c16 = (u16)GPU_RGB16(col);
+	if (w0 > 0 && h0 > 0)
+		for (int yy = y0; yy < y0 + h0; yy++)
+			for (int xx = x0; xx < x0 + w0; xx++)
+				expect_t[yy * FRAME_WIDTH + xx] = c16;
+	gpuClearImage(packet);
+	for (int i = 0; i < FRAME_WIDTH * FRAME_HEIGHT; i++)
+		if (le16_to_u16(vram_t[i]) != expect_t[i]) {
+			printf("FAIL clear trial %d at %d (x=%d y=%d w=%d h=%d)\n", trial, i, x, y, w, h);
+			fails++; return;
+		}
+}
+
 int main(void)
 {
 	/* differential test: both sides read the same LUT, values just need
@@ -269,8 +309,11 @@ int main(void)
 		run_tile_case<0x10a>("tile-0x10a", t);
 		run_tile_case<0x112>("tile-0x112", t);
 		run_tile_case<0x11a>("tile-0x11a", t);
+		if (t < 600) run_clear_case(t);
 		if (fails > 10) break;
 	}
+	if (pref_misaligned) { printf("FAIL: %d misaligned pref 30\n", pref_misaligned); return 1; }
+	printf("clear: 600 trials, %d pref-30 lines (poisoned, all fully overwritten)\n", pref_calls);
 	if (fails) { printf("FAILED: %d mismatching trials\n", fails); return 1; }
 	printf("PASS: %d trials x 6 sprite CFs + 30 poly CFs + 8 tile CFs, all bit-exact\n", N);
 	return 0;
