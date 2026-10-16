@@ -259,6 +259,9 @@ const PSD gpuPixelSpanDrivers[64] =
 ///////////////////////////////////////////////////////////////////////////////
 //  GPU Tiles innerloops generator
 
+#ifndef GPU_TILE_PREF_STORE
+#define GPU_TILE_PREF_STORE(a) __asm__ volatile("pref 30, 0(%0)" :: "r"(a) : "memory")
+#endif
 template<int CF>
 static inline void gpuTileSpanFn(le16_t *pDst, u16 data, u32 count)
 {
@@ -275,6 +278,11 @@ static inline void gpuTileSpanFn(le16_t *pDst, u16 data, u32 count)
 		 * le16_t*->u32* aliasing UB and compiles to a single sw. */
 		{
 			u16 raw = CF_MASKSET ? (u16)(data | 0x8000) : data;
+			/* every pixel of the span is written: allocate the 32 B lines
+			 * lying wholly inside it with pref 30 (no DDR fill) */
+			for (uintptr_t a = ((uintptr_t)pDst + 31) & ~(uintptr_t)31,
+			     e = ((uintptr_t)(pDst + count)) & ~(uintptr_t)31; a < e; a += 32)
+				GPU_TILE_PREF_STORE(a);
 			if ((uintptr_t)pDst & 2) {
 				*pDst++ = ldata;
 				if (!--count) return;

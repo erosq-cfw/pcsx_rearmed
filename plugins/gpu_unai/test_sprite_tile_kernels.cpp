@@ -68,6 +68,8 @@ static int host_raw_op_hit = 0;
 #include "../gpulib/gpu.h"   /* HTOLE/LE*TOH + gpulib decls, as in gpulib_if.cpp */
 #include "gpu_unai.h"
 #include "gpu_fixedpoint.h"
+#define GPU_TILE_PREF_STORE(a) do { tile_pref_calls++; memset((void *)(a), 0xEE, 32); } while (0)
+static int tile_pref_calls;
 #include "gpu_inner.h"
 /* gpuClearImage pref-30 path: the stub POISONS the line (worst-case
  * PrepareForStore semantics) -- any line the clear does not overwrite whole
@@ -186,6 +188,28 @@ static void run_poly_case(const char *name, int trial)
 		printf("FAIL %s trial %d [u=%u v=%u du=%d dv=%d count=%u mask=%08x]\n",
 		       name, trial, inn.u, inn.v, inn.u_inc, inn.v_inc, count, inn.mask_v00u);
 		fails++;
+	}
+}
+
+/* plain tile fill (CF 0x000/0x100) against an independent expectation: the
+ * pref-30 hook poisons whole lines, so any pref'd line not fully rewritten
+ * shows up as 0xEEEE. Long spans + every dst alignment. */
+template<int CF>
+static void run_tile_plain_case(int trial)
+{
+	fill_random();
+	u32 count = 1 + rnd() % (FRAME_WIDTH - 40);
+	u32 off = rnd() % 32;                       /* halfword offset in a line */
+	u16 data = (u16)(rnd() & 0x7fff);
+	u16 want = (CF & 0x100) ? (u16)(data | 0x8000) : data;
+	memcpy(bufB, bufA, sizeof(bufA));
+	gpuTileSpanFn<CF>(&bufA[off], data, count);
+	for (u32 i = 0; i < VRAM_ROWS * FRAME_WIDTH; i++) {
+		u16 exp = (i >= off && i < off + count) ? want : le16_to_u16(bufB[i]);
+		if (le16_to_u16(bufA[i]) != exp) {
+			printf("FAIL tile-plain CF %03x trial %d at %u (off=%u count=%u)\n", CF, trial, i, off, count);
+			fails++; return;
+		}
 	}
 }
 
@@ -310,9 +334,12 @@ int main(void)
 		run_tile_case<0x112>("tile-0x112", t);
 		run_tile_case<0x11a>("tile-0x11a", t);
 		if (t < 600) run_clear_case(t);
+		run_tile_plain_case<0x000>(t);
+		run_tile_plain_case<0x100>(t);
 		if (fails > 10) break;
 	}
 	if (pref_misaligned) { printf("FAIL: %d misaligned pref 30\n", pref_misaligned); return 1; }
+	printf("tile plain: %d trials x 2 CFs, %d pref-30 lines poisoned\n", N, tile_pref_calls);
 	printf("clear: 600 trials, %d pref-30 lines (poisoned, all fully overwritten)\n", pref_calls);
 	if (fails) { printf("FAILED: %d mismatching trials\n", fails); return 1; }
 	printf("PASS: %d trials x 6 sprite CFs + 30 poly CFs + 8 tile CFs, all bit-exact\n", N);
