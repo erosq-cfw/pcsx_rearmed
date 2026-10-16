@@ -689,6 +689,97 @@ static void rec_set_options()
 }
 
 
+/* EROSQ: block-entry guest-register preload.
+ *
+ * The register cache loads a guest reg the moment an emitter first asks for
+ * it (regMipsToHostHelper: LW host, offGPR(psx)) and the emitter consumes it
+ * in the very next host instruction. On the X1000 a load result consumed by
+ * the next instruction costs +3 cycles (+2 / +1 at distance 2 / 3; X1000 PM
+ * section 2.3). Every block starts with an empty cache (regReset), so each
+ * distinct guest reg a block reads pays that stall once.
+ *
+ * Instead, scan the block's first basic block (up to and including the first
+ * branch/jump and its delay slot), collect the regs that are READ BEFORE
+ * BEING WRITTEN, and load up to N of them back-to-back before any code is
+ * emitted: lw;lw;lw;lw -> each first use is >= 3 instructions after its
+ * load. The loads are the ones the emitters would have issued anyway (every
+ * collected reg is read in the first basic block), they map clean (an evict
+ * costs no store), and nothing else about the cache changes.
+ *
+ * EROSQ_PRELOAD=<n> overrides N (0 = off, max 6, default 4) for A/B within
+ * one binary. */
+static int rec_preload_max = -1;
+
+static bool rec_preload_ends_scan(u32 op, bool *is_branch)
+{
+	*is_branch = false;
+	switch (op >> 26) {
+	case 0x00:
+		switch (op & 0x3f) {
+		case 0x08: case 0x09: *is_branch = true; return false; /* JR/JALR */
+		case 0x0c: case 0x0d: return true;                     /* SYSCALL/BREAK */
+		}
+		return false;
+	case 0x01: case 0x02: case 0x03: case 0x04:
+	case 0x05: case 0x06: case 0x07:
+		*is_branch = true; return false;
+	case 0x10:                                          /* COP0: MTC0/RFE end blocks */
+		return true;
+	}
+	return false;
+}
+
+static void rec_preload_regs(u32 start_pc)
+{
+	if (rec_preload_max < 0) {
+		const char *e = getenv("EROSQ_PRELOAD");
+		rec_preload_max = e ? atoi(e) : 4;
+		if (rec_preload_max > 6) rec_preload_max = 6;
+		if (rec_preload_max < 0) rec_preload_max = 0;
+	}
+	if (rec_preload_max == 0)
+		return;
+
+	u32 written = 1;       /* $zero never needs loading */
+	u32 want[6];
+	int n = 0;
+	bool in_bd = false;
+	u32 p = start_pc;
+
+	for (int i = 0; i < 16 && n < rec_preload_max; i++, p += 4) {
+		const u32 *ptr = (const u32 *)PSXM(p);
+		if (ptr == INVALID_PTR || ptr == NULL)
+			break;
+		const u32 op = SWAP32(*ptr);
+		bool is_branch;
+		if (rec_preload_ends_scan(op, &is_branch))
+			break;
+		const u64 r64 = opcodeGetReads(op);
+		if (r64 == ~(u64)0)
+			break;          /* unknown opcode: stop, don't guess */
+		u32 rd = (u32)r64 & ~written;
+		while (rd && n < rec_preload_max) {
+			const int b = __builtin_ctz(rd);
+			rd &= rd - 1;
+			bool dup = false;
+			for (int k = 0; k < n; k++)
+				if (want[k] == (u32)b) { dup = true; break; }
+			if (!dup)
+				want[n++] = b;
+		}
+		written |= (u32)opcodeGetWrites(op);
+		if (in_bd)
+			break;          /* delay slot done */
+		if (is_branch)
+			in_bd = true;
+	}
+
+	for (int k = 0; k < n; k++) {
+		const u32 h = regMipsToHost(want[k], REG_LOAD, REG_REGISTER);
+		regUnlock(h);
+	}
+}
+
 static void recRecompile()
 {
 	// Notify plugin_lib that we're recompiling (affects frameskip timing)
@@ -760,6 +851,9 @@ static void recRecompile()
 
 	// Number of discardable instructions we are currently skipping
 	int discard_cnt = 0;
+
+	// EROSQ: issue the first basic block's guest-reg loads up front
+	rec_preload_regs(pc);
 
 	do {
 		// Flag indicates if next instruction lies in a BD slot
