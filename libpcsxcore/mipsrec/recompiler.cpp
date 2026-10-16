@@ -500,7 +500,9 @@ extern "C" int mipsrec_init_mmap(void)
 	 * readable/writable and makes the HW I/O pages PROT_NONE, so a direct
 	 * access that lands on a HW register faults into the faultmem handler;
 	 * the C code (psxHw*, memRLUT, const-HW JIT accesses that bake psxH)
-	 * uses a full read/write alias of the same pages. Coherent by sharing. */
+	 * uses a full read/write alias of the same pages. Coherent by sharing.
+	 * The object is anonymous (memfd, or a random O_EXCL 0600 shm name that
+	 * is unlinked immediately: mipsrec_anon_shm). */
 	{
 		int hfd = mipsrec_anon_shm(0x10000);
 		if (hfd < 0) {
