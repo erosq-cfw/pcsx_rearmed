@@ -271,6 +271,8 @@ int main(void)
 		run_sprite_case("spr-0x163", SpriteMaybeMXU<0x163>, t);
 		run_sprite_case("spr-0x020", SpriteMaybeMXU<0x020>, t);
 		run_sprite_case("spr-0x120", SpriteMaybeMXU<0x120>, t);
+		run_sprite_case("spr-0x040", SpriteMaybeMXU<0x040>, t);
+		run_sprite_case("spr-0x140", SpriteMaybeMXU<0x140>, t);
 		run_poly_case<0x020>("poly-0x020", t);
 		run_poly_case<0x040>("poly-0x040", t);
 		run_poly_case<0x060>("poly-0x060", t);
@@ -315,6 +317,6 @@ int main(void)
 	if (pref_misaligned) { printf("FAIL: %d misaligned pref 30\n", pref_misaligned); return 1; }
 	printf("clear: 600 trials, %d pref-30 lines (poisoned, all fully overwritten)\n", pref_calls);
 	if (fails) { printf("FAILED: %d mismatching trials\n", fails); return 1; }
-	printf("PASS: %d trials x 6 sprite CFs + 30 poly CFs + 8 tile CFs, all bit-exact\n", N);
+	printf("PASS: %d trials x 8 sprite CFs + 30 poly CFs + 8 tile CFs, all bit-exact\n", N);
 	return 0;
 }
