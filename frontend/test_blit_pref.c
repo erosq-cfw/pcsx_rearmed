@@ -3,7 +3,8 @@
  * semantics), run each 16bpp blit pl_vout_flip can select, and require the
  * row to equal an unpoisoned run. A blit that leaves any such byte unwritten
  * fails. (Host builds the C versions; the MXU twins write the same
- * dst_pixels -- covered by test_cspace_mxu.cpp.)
+ * dst_pixels -- covered by test_cspace_mxu.cpp.) pl_vout_flip only prefs
+ * full 320-px rows, so that is the width tested (1:1 also at random widths).
  *   cc -O2 -Iinclude -Ifrontend -o t frontend/test_blit_pref.c && ./t */
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,7 +37,7 @@ int main(void)
 	for (unsigned k = 0; k < sizeof(b) / sizeof(b[0]); k++)
 		for (int t = 0; t < 3000; t++) {
 			for (int i = 0; i < 2048 + 1024; i++) src[i] = rand();
-			int w = 1 + rand() % b[k].maxw, off = (rand() % 16) * 2;  /* dst byte offset, 2-aligned */
+			int w = (k == 0 && t & 1) ? 1 + rand() % b[k].maxw : 320, off = (rand() % 16) * 2;  /* dst byte offset, 2-aligned */
 			memset(ref, 0x55, sizeof(ref)); memset(got, 0x55, sizeof(got));
 			b[k].f(ref + off, src, w);
 			poison_full_lines(got + off, w * 2);

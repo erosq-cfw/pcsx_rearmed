@@ -403,7 +403,8 @@ void pl_force_clear(void)
 /* EROSQ X1000: every 16bpp blit rewrites its destination row completely, so
  * the 32 B lines lying wholly inside it can be allocated with pref 30
  * (PrepareForStore) instead of a write-allocate fill from DDR (xbbench:
- * 2.7x on a plain fill). Partial head/tail lines are left alone. */
+ * 2.7x on a plain fill). Partial head/tail lines are left alone, and only
+ * full 320-px rows are touched (see the caller). */
 #if defined(EROSQ) && defined(__mips__)
 #define PL_PREF_STORE(a) __asm__ volatile("pref 30, 0(%0)" :: "r"(a) : "memory")
 #endif
@@ -557,7 +558,9 @@ static void pl_vout_flip(const void *vram_, int vram_ofs, int bgr24,
 	{
 		unsigned int vram_mask = enhres ? ~0 : 0xfffff;
 		for (h1 = h; h1-- > 0; dest += dstride * 2) {
-			pl_pref_store_row(dest, w * 2);
+			if (w == 320)	/* full panel rows only: every blit writes all
+					 * 320 (dscale kernels emit 10-px groups) */
+				pl_pref_store_row(dest, 320 * 2);
 			blit(dest, vram + vram_ofs, w);
 			vram_ofs = (vram_ofs + sstride) & vram_mask;
 		}
