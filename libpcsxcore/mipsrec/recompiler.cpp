@@ -539,6 +539,7 @@ char	disasm_buffer[512];
  * written. Called from regMipsChanged(). */
 static void lsu_note_guest_reg_write(u32 regpsx);
 
+#include "emitstat.h"
 #include "regcache.h"
 
 static void recReset();
@@ -894,7 +895,10 @@ static void recRecompile()
 	int discard_cnt = 0;
 
 	// EROSQ: issue the first basic block's guest-reg loads up front
+	u8 *es_blk0 = (u8 *)recMem;
+	const u32 es_pc0 = pc;
 	rec_preload_regs(pc);
+	if (emitstat_enabled()) es_prologue += (u8 *)recMem - es_blk0;
 
 	do {
 		// Flag indicates if next instruction lies in a BD slot
@@ -927,9 +931,26 @@ static void recRecompile()
 #endif
 
 		// Recompile next instruction.
-		recBSC[psxRegs.code>>26]();
+		if (__builtin_expect(es_on > 0, 0)) {
+			const u32 es_op = psxRegs.code, es_ipc = pc;
+			u8 *es_b = (u8 *)recMem;
+			recBSC[es_op>>26]();
+			const int c = es_classify(es_op);
+			es_bytes[c] += (u8 *)recMem - es_b;
+			es_calls[c]++;
+			es_guest[c] += (pc - es_ipc) / 4 + 1;  /* series/branches consume more */
+		} else
+			recBSC[psxRegs.code>>26]();
 		regUpdate();
 	} while (!end_block);
+
+	if (es_on > 0) {
+		es_blocks++;
+		es_block_bytes += (u8 *)recMem - es_blk0;
+		es_block_guest += (pc - es_pc0) / 4;
+		if ((es_blocks & 4095) == 0)
+			mipsrec_emitstat_dump_(stderr);
+	}
 
 	DISASM_HOST();
 	clear_insn_cache(recMemStart, recMem, 0);
@@ -2241,4 +2262,22 @@ extern "C" {
 	void mipsrec_rec_clear(u32 addr, u32 size)      { recClear(addr, size); }
 	void mipsrec_rec_notify(int note, void *data)   { recNotify(note, data); }
 	void mipsrec_rec_shutdown(void)                 { recShutdown(); }
+}
+
+/* EROSQ: compile one block at 'start' without executing it (offline
+ * emit-size harness, see erosq-emitstat/). Returns the guest PC after the
+ * block. Not used by the emulator. */
+extern "C" u32 mipsrec_rec_compile_at(u32 start)
+{
+	psxRegs.pc = start;
+	recRecompile();
+	return pc;
+}
+extern "C" void *mipsrec_rec_cur(void) { return recMem; }
+/* offline harness only: emit blocks as the live dispatcher would (direct
+ * returns to a fixed loop address) instead of the boot-time indirect mode */
+extern "C" void mipsrec_rec_harness_direct_returns(uintptr_t loop, uintptr_t fast)
+{
+	block_ret_addr = loop;
+	block_fast_ret_addr = fast;
 }
