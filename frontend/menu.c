@@ -1588,12 +1588,20 @@ void erosq_vol_set(int pct);
 static int hw_volume;
 static int hw_volume_applied;
 static const char h_hw_volume[] = "Headphone/line-out volume (DAC hardware)";
-static void menu_spu_prep(void)
+static void hw_volume_prep(void)
 {
 	if (hw_volume != hw_volume_applied) {
 		erosq_vol_set(hw_volume);
 		hw_volume_applied = hw_volume;
 	}
+}
+/* Re-read the DAC on every menu open: erosq-ui (or a BT/HP volume key) may
+ * have moved it since we last looked. */
+static void hw_volume_seed(void)
+{
+	int v = erosq_vol_get();
+	if (v >= 0)
+		hw_volume = hw_volume_applied = v;
 }
 #endif
 
@@ -1614,10 +1622,8 @@ static int menu_loop_plugin_spu(int id, int keys)
 {
 	static int sel = 0;
 #ifdef EROSQ
-	int v = erosq_vol_get();
-	if (v >= 0)
-		hw_volume = hw_volume_applied = v;
-	me_loop_d(e_menu_plugin_spu, &sel, menu_spu_prep, NULL);
+	hw_volume_seed();
+	me_loop_d(e_menu_plugin_spu, &sel, hw_volume_prep, NULL);
 #else
 	me_loop(e_menu_plugin_spu, &sel);
 #endif
@@ -2583,6 +2589,10 @@ static menu_entry e_menu_main[] =
 {
 	mee_label     (""),
 	mee_label     (""),
+#ifdef EROSQ
+	/* Same slider as Options > Plugins > SPU, surfaced: that was 4 levels deep */
+	mee_range_h   ("Volume",             0, hw_volume, 0, 100, h_hw_volume),
+#endif
 	mee_handler_id("Resume game",        MA_MAIN_RESUME_GAME, main_menu_handler),
 	mee_handler_id("Save State",         MA_MAIN_SAVE_STATE,  main_menu_handler),
 	mee_handler_id("Load State",         MA_MAIN_LOAD_STATE,  main_menu_handler),
@@ -2629,9 +2639,20 @@ void menu_loop(void)
 
 	in_set_config_int(0, IN_CFG_BLOCKING, 1);
 
+#ifdef EROSQ
+	hw_volume_seed();
+	/* Open on "Resume game" so Play resumes, even though Volume is the first
+	 * row; with no game loaded me_loop_d skips the disabled rows forward to
+	 * "Load CD image", as before. */
+	sel = me_id2offset(e_menu_main, MA_MAIN_RESUME_GAME);
+	do {
+		me_loop_d(e_menu_main, &sel, hw_volume_prep, draw_frame_main);
+	} while (!ready_to_go && !g_emu_want_quit);
+#else
 	do {
 		me_loop_d(e_menu_main, &sel, NULL, draw_frame_main);
 	} while (!ready_to_go && !g_emu_want_quit);
+#endif
 
 	/* wait until menu, ok, back is released */
 	while (in_menu_wait_any(NULL, 50) & (PBTN_MENU|PBTN_MOK|PBTN_MBACK))
