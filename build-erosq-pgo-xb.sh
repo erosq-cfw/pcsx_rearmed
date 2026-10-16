@@ -18,6 +18,6 @@ PROF="$(pwd)/pgo-profile"
 make clean >/dev/null 2>&1
 [ -n "$XB_CC1_DIR" ] && [ -x "$XB_CC1_DIR/cc1" ] || { echo "set XB_CC1_DIR to a gcc build/gcc dir carrying erosq-gcc/0001-*.patch"; exit 1; }
 make -j"$(nproc)" USE_ASYNC_CDROM=1 \
-	CFLAGS_OPT="-Ofast -B$XB_CC1_DIR/ -fprofile-use=$PROF -fprofile-partial-training -fprofile-correction -Wno-error=coverage-mismatch -Wno-coverage-mismatch"
+	CFLAGS_OPT="-Ofast -B$XB_CC1_DIR/ -fprofile-use=$PROF -fprofile-partial-training -fprofile-correction -Wno-error=coverage-mismatch -Wno-coverage-mismatch --param max-unroll-times=2"
 echo "=== PGO BUILD RESULT ==="
 ls -la pcsx && file pcsx
