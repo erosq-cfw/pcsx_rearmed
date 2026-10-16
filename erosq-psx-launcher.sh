@@ -23,9 +23,15 @@ cp -f scph1001.bin .pcsx/bios/scph1001.bin 2>/dev/null
 # a pcsx crash/kill too -- so the rest of the system never runs overclocked.
 OC=/sys/kernel/erosq_oc/cpu_mhz
 if [ -w "$OC" ]; then
-	trap 'echo 1008 > "$OC" 2>/dev/null' EXIT INT TERM
+	trap 'echo 1008 > "$OC" 2>/dev/null' EXIT
 	echo 1200 > "$OC" 2>/dev/null
 fi
 
+# A TERM/INT trap that returns would run the mpd tail below. On a critical
+# battery erosq-ui SIGTERMs our group, SIGKILLs it 3 s later and starts mpd
+# itself: a tail mpd straddling that SIGKILL loses its daemonize parent and dies
+# of SIGPIPE at commit (mpd ignores SIGPIPE only after), after the UI's pidof
+# already saw it -> no mpd, no /data/mpd.state. So exit; EXIT still restores OC.
+trap 'exit 143' INT TERM
 ALSA_NAME=plughw:0,0 ./pcsx                     # no -cdfile => pcsx's own disc browser
 [ "$was_up" ] && mpd 2>/dev/null
