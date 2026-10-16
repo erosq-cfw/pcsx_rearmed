@@ -391,12 +391,33 @@ void bgr888_to_xrgb8888_640_to_320(void * __restrict__ dst_,
  * panel image is identical -- but this way the frame goes VRAM -> scanout
  * in one pass (direct path) instead of convert-to-shadow + scale-present. */
 static int16_t scaled_xmap[320];
+static int scaled_src_w;
 void bgr555_to_rgb565_scaled_setup(int src_w)
 {
 	int x;
 	for (x = 0; x < 320; x++)
 		scaled_xmap[x] = x * src_w / 320;
+	scaled_src_w = src_w;
 }
+
+/* 368 -> 320 (Ape Escape's gameplay mode) is a fixed 23:20 ratio: output
+ * group g (20 px) reads source 23g + floor(i*23/20). Constant offsets let the
+ * loads use immediates instead of the xmap table (one dependent load less per
+ * pixel). Same picks as the table, so bit-identical. */
+#define S368(i) ((i) * 23 / 20)
+static void bgr555_to_rgb565_368_to_320(uint32_t * __restrict__ dst,
+	const uint16_t * __restrict__ src)
+{
+	int g;
+	for (g = 0; g < 16; g++, src += 23, dst += 10) {
+#define P368(k) dst[k] = bgr555_to_rgb565_pair(LE16TOH(src[S368(2*(k))]) | \
+		((uint32_t)LE16TOH(src[S368(2*(k)+1)]) << 16))
+		P368(0); P368(1); P368(2); P368(3); P368(4);
+		P368(5); P368(6); P368(7); P368(8); P368(9);
+#undef P368
+	}
+}
+#undef S368
 
 void bgr555_to_rgb565_scaled_to_320(void * __restrict__ dst_,
 	const void * __restrict__ src_, int dpixels)
@@ -407,6 +428,10 @@ void bgr555_to_rgb565_scaled_to_320(void * __restrict__ dst_,
 
 	if (dpixels > 320)
 		dpixels = 320;
+	if (scaled_src_w == 368 && dpixels == 320 && !((uintptr_t)dst_ & 3)) {
+		bgr555_to_rgb565_368_to_320(dst_, src);
+		return;
+	}
 	if (!((uintptr_t)dst_ & 3)) {
 		uint32_t * __restrict__ dst = dst_;
 		for (; x + 1 < dpixels; x += 2) {
