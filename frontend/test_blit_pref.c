@@ -21,7 +21,7 @@ static void poison_full_lines(void *d, int bytes)
 int main(void)
 {
 	static uint16_t src[2048 + 1024];
-	static uint8_t ref[2048] __attribute__((aligned(64))), got[2048] __attribute__((aligned(64)));
+	static uint8_t ref[4096] __attribute__((aligned(64))), got[4096] __attribute__((aligned(64)));
 	struct { const char *n; blitfn f; int maxw; } b[] = {
 		{ "1:1",        bgr555_to_rgb565, 1024 },
 		{ "512->320",   bgr555_to_rgb565_512_to_320, 320 },
