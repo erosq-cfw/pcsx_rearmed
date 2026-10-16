@@ -214,7 +214,7 @@ static void lsu_note_guest_reg_write(u32 regpsx)
 		return;
 	for (int i = 0; i < LSU_TMP_CACHE_SIZE; ++i) {
 		if (lsu_tmp_cache[i].use_type == LSU_TMP_CACHE_USE_TYPE_CONVADDR &&
-		    lsu_tmp_cache[i].constval == regpsx) {
+		    (lsu_tmp_cache[i].constval & 0xff) == regpsx) {
 			lsu_tmp_cache[i].use_type = LSU_TMP_CACHE_USE_TYPE_INVALID;
 			lsu_tmp_cache[i].age = 0;
 		}
@@ -268,12 +268,35 @@ static u32 emitConstBaseRegLUI(const u16 adr_hi)
  * NOTE: This function is shared with rec_gte.cpp.h
  *
  */
+/* EROSQ guest->host containment (2026-10-17).
+ * METHOD-1 host address = PSX_MEM_VADDR | (rs & mask), then + sign-extended
+ * imm16 by the access itself. lsu_conv_kind selects the mask:
+ *   LSU_CONV_ANY     28 bits: host in [0x10000000, 0x1fffffff] (+imm:
+ *                    [0x0fff8000, 0x20007fff]). Used where a base may be RAM
+ *                    OR scratchpad (sp/gp/k0/k1/zero bases, range-checked
+ *                    dual-path series, GTE LWC2/SWC2).
+ *   LSU_CONV_RAM     23 bits: host in [0x10000000, 0x107fffff] = the 4 RAM
+ *                    mirrors (+imm: one extra mirror is mapped on each side,
+ *                    so every access lands in PSX RAM). Used for direct-only
+ *                    series whose base the const/fuzzy tracker calls RAM.
+ *   LSU_CONV_SCRATCH 10 bits at 0x1f800000 (+imm: [0x1f7f8000, 0x1f8083ff],
+ *                    i.e. psxP/psxH). Fuzzy-scratchpad direct-only series.
+ * Same instruction count for every kind (LUI + INS). Everything an ANY access
+ * can reach that is not a PSX region is a PROT_NONE reservation made in
+ * mipsrec_init_mmap() ([0x0fe00000, 0x20010000)), so no other host memory is
+ * reachable from any fast path. See test_lsu_bounds (offline/). */
+enum { LSU_CONV_ANY = 0, LSU_CONV_RAM = 1, LSU_CONV_SCRATCH = 2 };
+static int lsu_conv_kind = LSU_CONV_ANY;
+
 static u32 emitAddressConversion(const u32 op_rs,
                                  const u32 rs,
                                  const u32 desired_reg,
                                  const u32 tmp_reg,
                                  const bool cacheable)
 {
+	const int kind = lsu_conv_kind;
+	const u16 conv_hi = (kind == LSU_CONV_SCRATCH) ? 0x1f80 : (PSX_MEM_VADDR >> 16);
+	const int conv_bits = (kind == LSU_CONV_RAM) ? 23 : (kind == LSU_CONV_SCRATCH) ? 10 : 28;
 	if (psx_mem_mapped)
 	{
 		// METHOD 1 : psxM is mmap'd to fixed virtual address, RAM is mirrored,
@@ -305,22 +328,25 @@ static u32 emitAddressConversion(const u32 op_rs,
 		// also rely on our at-least-one-insn BD-slot promise, which a cache
 		// hit would break.
 		if (cacheable) {
+			/* key = guest reg | kind << 8: a RAM-masked conversion
+			 * must never be reused for an ANY access and vice versa */
 			lsu_tmp_cache_entry_t *entry = LSU_tmp_cache_get_reg(
-				LSU_TMP_CACHE_USE_TYPE_CONVADDR, op_rs, 0);
+				LSU_TMP_CACHE_USE_TYPE_CONVADDR, op_rs | (kind << 8), 0);
 			if (entry->use_type != LSU_TMP_CACHE_USE_TYPE_INVALID)
 				return entry->host_reg;   // hit: address already live
 			entry->use_type = LSU_TMP_CACHE_USE_TYPE_CONVADDR;
-			entry->constval = op_rs;
-			LUI(entry->host_reg, (PSX_MEM_VADDR >> 16));
-			INS(entry->host_reg, rs, 0, 28);
+			entry->constval = op_rs | (kind << 8);
+			LUI(entry->host_reg, conv_hi);
+			INS(entry->host_reg, rs, 0, conv_bits);
 			return entry->host_reg;
 		}
 	#endif
 
-		LUI(desired_reg, (PSX_MEM_VADDR >> 16));
+		LUI(desired_reg, conv_hi);
 	#ifdef HAVE_MIPS32R2_EXT_INS
-		INS(desired_reg, rs, 0, 28);
+		INS(desired_reg, rs, 0, conv_bits);
 	#else
+		#error "EROSQ containment masks need INS (MIPS32r2)"
 		SLL(tmp_reg, rs, 4);
 		SRL(tmp_reg, tmp_reg, 4);
 		OR(desired_reg, desired_reg, tmp_reg);
@@ -846,9 +872,18 @@ static void general_loads_stores(const int  count,
 		//  TEMP_1 will hold converted base reg, TEMP_2 is overwritten temp reg.
 		//  However, in the future, emitAddressConversion() might return a
 		//  different reg, if caching of converted addresses is ever implemented.
+		if (!emit_indirect) {
+#ifdef USE_CONST_FUZZY_ADDRESSES
+			if (IsFuzzyRamAddr(op_rs))
+				lsu_conv_kind = LSU_CONV_RAM;
+			else if (IsFuzzyScratchpadAddr(op_rs))
+				lsu_conv_kind = LSU_CONV_SCRATCH;
+#endif
+		}
 		const u32 converted_base_reg =
 			emitAddressConversion(op_rs, rs, TEMP_1, TEMP_2,
 			                      !emit_address_range_check);  // <BD slot>
+		lsu_conv_kind = LSU_CONV_ANY;
 
 		// Code invalidation needs the original base register value. However,
 		//  it sometimes gets overwritten by the last load in a series.
@@ -1660,6 +1695,14 @@ static bool emitOptimizedStaticLoad()
 			array_offset_reg = 0;
 		}
 	}
+
+	/* EROSQ containment: the static-array form adds a guest-controlled,
+	 * unmasked offset reg to a host address (host = psxM_lo + reg), i.e. an
+	 * arbitrary host read for a crafted image. Let the normal path compile
+	 * LUI/ADDU/L* instead: the base becomes fuzzy-RAM and its access goes
+	 * through the RAM-masked conversion (rec_lsu emitAddressConversion). */
+	if (array_offset_reg != 0)
+		return false;
 
 	DISASM_PSX(pc);
 	pc += 4;

@@ -395,6 +395,9 @@ static bool rec_mem_mapped;                /* Code ptr arrays mmap'd+mirrored at
  *   - expansion (psxP) and BIOS (psxR) are indirect-only; plain anonymous maps.
  * On any failure everything is unwound and -1 returned, so psxMemInit() can fall
  * back to the plain (METHOD-2) map and the emulator still runs, just slower. */
+#define RESV_LO 0x0fe00000u
+#define RESV_HI 0x20010000u
+
 extern "C" int mipsrec_init_mmap(void)
 {
 	int   fd = -1;
@@ -404,11 +407,29 @@ extern "C" int mipsrec_init_mmap(void)
 	if (getenv("EROSQ_NOMIRROR")) return -1;
 
 	void *ram = MAP_FAILED, *hw = MAP_FAILED, *exp = MAP_FAILED, *bios = MAP_FAILED;
+	void *resv = MAP_FAILED;
 	int   n_ram_maps = 0;
+	int   n_guard_mirrors = 0;
 
 	if (sysconf(_SC_PAGESIZE) > 65536) {
 		printf("mipsrec_init_mmap: page size > 64KB unsupported\n");
 		return -1;
+	}
+
+	/* EROSQ containment: every METHOD-1 fast-path access computes
+	 * 0x10000000 | (base & mask) + sext(imm16), i.e. a host address in
+	 * [0x0fff8000, 0x20007fff]. Reserve the whole span (rounded out to
+	 * [0x0fe00000, 0x20010000)) as PROT_NONE before mapping the PSX regions
+	 * into it, so that no other host mapping can ever live where a guest
+	 * address can reach. MAP_FIXED_NOREPLACE: if anything already occupies
+	 * the span we refuse METHOD-1 rather than clobber it. Costs VA only. */
+	resv = mmap((void *)RESV_LO, RESV_HI - RESV_LO, PROT_NONE,
+	            MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE, -1, 0);
+	if (resv != (void *)RESV_LO) {
+		if (resv != MAP_FAILED) munmap(resv, RESV_HI - RESV_LO);
+		resv = MAP_FAILED;
+		printf("mipsrec_init_mmap: guest window [%#x,%#x) not free\n", RESV_LO, RESV_HI);
+		goto fail;
 	}
 
 	/* Shared backing object for the 2MB RAM + its 3 mirrors. */
@@ -427,6 +448,20 @@ extern "C" int mipsrec_init_mmap(void)
 			goto fail;
 		}
 		if (n_ram_maps == 0) ram = got;
+	}
+
+	/* One more RAM mirror directly below and above the 8MB mirror block:
+	 * RAM-masked conversions (23 bits) plus a negative / positive imm16 then
+	 * still land in PSX RAM instead of faulting. */
+	{
+		void *lo = mmap((void *)(uintptr_t)(PSX_MEM_VADDR - 0x200000), 0x200000,
+		                PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, 0);
+		void *hi = mmap((void *)(uintptr_t)(PSX_MEM_VADDR + 0x800000), 0x200000,
+		                PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, 0);
+		if (lo == MAP_FAILED || hi == MAP_FAILED) {
+			printf("mipsrec_init_mmap: guard RAM mirrors failed\n"); goto fail;
+		}
+		n_guard_mirrors = 2;
 	}
 
 	/* scratchpad + HW I/O region, fixed at 0x1f800000 (METHOD-1 expects it there). */
@@ -464,6 +499,12 @@ extern "C" int mipsrec_init_mmap(void)
 	return 0;
 
 fail:
+	if (resv != MAP_FAILED) {
+		/* drops the PSX regions mapped inside the reservation too */
+		munmap((void *)RESV_LO, RESV_HI - RESV_LO);
+		n_ram_maps = 0; hw = MAP_FAILED; exp = MAP_FAILED;
+	}
+	(void)n_guard_mirrors;
 	while (n_ram_maps-- > 0)
 		munmap((void *)(uintptr_t)(PSX_MEM_VADDR + 0x200000ULL * n_ram_maps), 0x200000);
 	if (hw   != MAP_FAILED) munmap(hw,   0x10000);
