@@ -7,6 +7,10 @@
 # The profile was collected under the INTERPRETER (the mipsrec dynarec SIGBUSes
 # under gcov instrumentation), then applied to the dynarec build. -fprofile-
 # partial-training keeps the unprofiled dynarec TUs from being pessimized.
+# NOTE (2026-10-16): the shipped binary is built with build-erosq-pgo-xb.sh
+# (same profile + the X1000-latency gcc scheduler patch in erosq-gcc/, cc1 at
+# gcc-xburst-cc1). Building ship binaries with THIS script
+# silently drops that scheduler (measured ~3-4%) -- same trap as the PGO one.
 set -e
 export PATH=buildroot-2026.08/output/host/bin:$PATH
 cd "$(dirname "$0")"
