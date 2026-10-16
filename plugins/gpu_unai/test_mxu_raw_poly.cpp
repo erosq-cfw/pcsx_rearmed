@@ -61,6 +61,12 @@ static inline u32_pre hx_pack(u32_pre hi, u32_pre lo) { return ((hi & 0xffff) <<
 #define MXU_S32M2I(r)     (host_xr[(r)])
 #define MXU_S32LDD(r, b)  do { u32_pre _v; memcpy(&_v, (const void *)(b), 4); hx_set((r), _v); } while (0)
 #define MXU_S32STD(r, b)  do { u32_pre _v = host_xr[(r)]; memcpy((void *)(b), &_v, 4); } while (0)
+#define MXU_S32LDDO(r, b, off) do { u32_pre _v; memcpy(&_v, (const char *)(b) + (off), 4); hx_set((r), _v); } while (0)
+#define MXU_S32STDO(r, b, off) do { u32_pre _v = host_xr[(r)]; memcpy((char *)(b) + (off), &_v, 4); } while (0)
+#define MXU_S32SFL(a, b, c, d, ptn2) do { \
+	if ((ptn2) != 3) { fprintf(stderr, "model: only SFL ptn2=3\n"); exit(2); } \
+	u32_pre _b = host_xr[(b)], _c = host_xr[(c)]; \
+	hx_set((a), (_b & 0xffff0000u) | (_c >> 16)); hx_set((d), (_b << 16) | (_c & 0xffffu)); } while (0)
 #define MXU_S32AND(a, b, c) hx_set((a), host_xr[(b)] & host_xr[(c)])
 #define MXU_S32OR(a, b, c)  hx_set((a), host_xr[(b)] | host_xr[(c)])
 #define MXU_S32XOR(a, b, c) hx_set((a), host_xr[(b)] ^ host_xr[(c)])

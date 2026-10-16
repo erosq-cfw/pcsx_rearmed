@@ -125,6 +125,33 @@ static inline u32 mxu_light_pair(u32 tw)
 #endif /* GPU_MXU_HOST_TEST (light core) */
 
 /* load gouraud pair-accumulators: xr1/2/3 = [c+dc : c], xr4/5/6 = [2dc : 2dc] */
+#if defined(MXU_S32LDDO) && defined(MXU_S32SFL)
+static_assert(offsetof(gpu_unai_inner_t, gInc) == offsetof(gpu_unai_inner_t, gCol) + 8,
+	      "mxu_gouraud_setup loads gCol/gInc as 4 consecutive words");
+/* EROSQ: built in XR from the packed gcol_t words (raw32[0] = g:r,
+ * raw32[1] = x:b) with 4 loads, 4 per-lane adds and 4 halfword shuffles --
+ * ~11 instructions instead of ~34 GPR pack ops + 6 S32I2M per gouraud span
+ * (Crash averages ~9 px/span, so this is per-span fixed cost). Lane adds
+ * are mod 2^16, exactly the (x & 0xffff) of the GPR version; XR7-13 are
+ * free here (light lanes are rebuilt per pair from XR1-3). */
+static inline void mxu_gouraud_setup(const gpu_unai_inner_t &inn)
+{
+	/* one base register for all four words (gCol/gInc are adjacent) */
+	const char *base = (const char *)&inn.gCol;
+	MXU_S32LDDO(MXU_XR10, base, 0);      /* g  : r  */
+	MXU_S32LDDO(MXU_XR11, base, 4);      /* .. : b  */
+	MXU_S32LDDO(MXU_XR12, base, 8);      /* dg : dr */
+	MXU_S32LDDO(MXU_XR13, base, 12);     /* .. : db */
+	MXU_Q16ADD(MXU_XR8, MXU_XR10, MXU_XR12, MXU_XR0, MXU_WW, MXU_AA);  /* g+dg : r+dr */
+	MXU_Q16ADD(MXU_XR9, MXU_XR11, MXU_XR13, MXU_XR0, MXU_WW, MXU_AA);  /* ..   : b+db */
+	MXU_Q16ADD(MXU_XR7, MXU_XR12, MXU_XR12, MXU_XR0, MXU_WW, MXU_AA);  /* 2dg  : 2dr  */
+	MXU_Q16ADD(MXU_XR12, MXU_XR13, MXU_XR13, MXU_XR0, MXU_WW, MXU_AA); /* ..   : 2db  */
+	MXU_S32SFL(MXU_XR2, MXU_XR8, MXU_XR10, MXU_XR1, 3);  /* [g+dg:g], [r+dr:r] */
+	MXU_S32SFL(MXU_XR0, MXU_XR9, MXU_XR11, MXU_XR3, 3);  /*           [b+db:b] */
+	MXU_S32SFL(MXU_XR5, MXU_XR7, MXU_XR7, MXU_XR4, 3);   /* [2dg:2dg], [2dr:2dr] */
+	MXU_S32SFL(MXU_XR0, MXU_XR12, MXU_XR12, MXU_XR6, 3); /*           [2db:2db] */
+}
+#else
 static inline void mxu_gouraud_setup(const gpu_unai_inner_t &inn)
 {
 	u32 r = inn.gCol.c.r, g = inn.gCol.c.g, b = inn.gCol.c.b;
@@ -136,6 +163,7 @@ static inline void mxu_gouraud_setup(const gpu_unai_inner_t &inn)
 	MXU_S32I2M(MXU_XR5, (((2 * dg) & 0xffff) << 16) | ((2 * dg) & 0xffff));
 	MXU_S32I2M(MXU_XR6, (((2 * db) & 0xffff) << 16) | ((2 * db) & 0xffff));
 }
+#endif
 
 static inline void mxu_gouraud_step_pair(void)
 {
