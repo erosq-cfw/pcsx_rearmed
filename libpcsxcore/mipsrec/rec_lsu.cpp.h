@@ -678,7 +678,16 @@ static void general_loads_stores(const int  count,
 
 #ifdef USE_DIRECT_MEM_ACCESS
 	const bool emit_direct   = !force_indirect && !LSU_use_only_indirect_access(op_rs);
-	const bool emit_indirect = !emit_direct || !LSU_use_only_direct_access(op_rs);
+	bool       emit_indirect = !emit_direct || !LSU_use_only_direct_access(op_rs);
+	/* EROSQ faultmem: the MMU replaces the range check + inline slow path
+	 * (see recompiler.cpp). Only the scratchpad skip of the SMC
+	 * invalidation remains, below. */
+	bool fm_series = false;
+	if (faultmem_block && emit_direct && emit_indirect) {
+		emit_indirect = false;
+		fm_series = true;
+		faultmem_block_used = true;
+	}
 #else
 	// NOTE: If you are debugging, #undefine identifier 'USE_DIRECT_MEM_ACCESS'
 	//       and recompile dynarec. Just forcing these false/true isn't enough.
@@ -1019,6 +1028,16 @@ static void general_loads_stores(const int  count,
 
 			bool first_invalidation_done = false;
 
+			if (fm_series) {
+				// No range check ran: skip the invalidation for scratchpad
+				//  (and any faulted HW) bases -- bit 27 of a guest RAM
+				//  address is 0, of 0x1f80_xxxx it is 1. Uses the base reg
+				//  (not base+imm): a 16-bit offset can't cross 0x0800_0000.
+				SLL(MIPSREG_A1, unmodified_base_reg, 4);
+				backpatch_label_exit_1 = (u32 *)recMem;
+				BLTZ(MIPSREG_A1, 0);
+				// <BD>: the LUI below
+			}
 			LUI(TEMP_3, ADR_HI(recRAM)); // temp_3 = upper code block ptr array addr
 
 			u32 PC = pc - 4;
@@ -1087,7 +1106,7 @@ static void general_loads_stores(const int  count,
 				}
 				ADDU(TEMP_1, TEMP_1, TEMP_3);
 
-				if ((PC-4) == pc_of_last_store_in_series && emit_direct) {
+				if ((PC-4) == pc_of_last_store_in_series && emit_direct && !fm_series) {
 					// This is the last store in the series, so the last invalidation
 					//  made and the end of all the direct code. Skip past the
 					//  indirect code coming after this.
