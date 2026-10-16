@@ -44,5 +44,12 @@ u32 DIVIDE(u16 numerator, u16 denominator)
 	int r3 = ((0x80 - r2 * (r1 + 0x8000)) >> 8) & 0x1ffff;
 	u32 reciprocal = (r2 * r3 + 0x80) >> 8;
 
-	return ((u64)reciprocal * (numerator << shift) + 0x8000) >> 16;
+	/* EROSQ: same value as ((u64)reciprocal * (numerator << shift) + 0x8000)
+	 * >> 16, formed from one multu instead of mtlo/mthi + maddu (two extra
+	 * MDU ops at +3 interlock each on the X1000): (hi*2^32 + lo + 2^15) >> 16
+	 * == hi*2^16 + (lo >> 16) + [lo & 0xffff >= 0x8000]. Exhaustively
+	 * checked against the original form by test_gte_divide.c. */
+	u64 p = (u64)reciprocal * (u32)(numerator << shift);
+	u32 lo = (u32)p, hi = (u32)(p >> 32);
+	return (hi << 16) + (lo >> 16) + ((lo >> 15) & 1);
 }
