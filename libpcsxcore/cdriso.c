@@ -50,6 +50,8 @@
 #define rewind(f_) rfseek(f_, 0, SEEK_SET)
 #endif
 
+#include "cdriso_seek.h"
+
 #define OFF_T_MSB ((off_t)1 << (sizeof(off_t) * 8 - 1))
 
 unsigned int cdrIsoMultidiskCount;
@@ -1018,6 +1020,34 @@ fail_io:
 }
 
 #ifdef HAVE_CHD
+/* same as libchdr's chd_open_file() stdio wrapper (non-owning: chd_close()
+ * frees only this struct), but SEEK_SET goes through cdriso_seek_set */
+static uint64_t chd_cf_fsize(core_file *cf)
+{
+	FILE *f = cf->argp;
+	off_t o = ftello(f), size;
+	if (fseeko(f, 0, SEEK_END))
+		return (uint64_t)-1;
+	size = ftello(f);
+	fseeko(f, o, SEEK_SET);
+	return size < 0 ? (uint64_t)-1 : (uint64_t)size;
+}
+static size_t chd_cf_fread(void *p, size_t size, size_t n, core_file *cf)
+{
+	return fread(p, size, n, (FILE *)cf->argp);
+}
+static int chd_cf_fclose(core_file *cf)
+{
+	free(cf);
+	return 0;
+}
+static int chd_cf_fseek(core_file *cf, int64_t off, int whence)
+{
+	if (whence == SEEK_SET)
+		return cdriso_seek_set(cf->argp, (off_t)off);
+	return fseeko(cf->argp, (off_t)off, whence);
+}
+
 static int handlechd(const char *isofile) {
 	int frame_offset = 150;
 	int file_offset = 0;
@@ -1032,7 +1062,15 @@ static int handlechd(const char *isofile) {
 	if (chd_img == NULL)
 		goto fail_io;
 
-	err = chd_open_file(cdHandle, CHD_OPEN_READ, NULL, &chd_img->chd);
+	core_file *cf = malloc(sizeof(*cf));
+	if (cf == NULL)
+		goto fail_io;
+	cf->argp = cdHandle;
+	cf->fsize = chd_cf_fsize;
+	cf->fread = chd_cf_fread;
+	cf->fclose = chd_cf_fclose;
+	cf->fseek = chd_cf_fseek;
+	err = chd_open_core_file(cf, CHD_OPEN_READ, NULL, &chd_img->chd);
 	if (err != CHDERR_NONE) {
 		if (is_chd_ext)
 			SysPrintf("chd_open: %d\n", err);
@@ -1163,7 +1201,7 @@ static int cdread_normal(FILE *f, unsigned int base, void *dest, int sector)
 		return -1;
 	if (!dest)
 		dest = cdbuffer;
-	if (fseeko(f, base + sector * CD_FRAMESIZE_RAW, SEEK_SET))
+	if (cdriso_seek_set(f, base + sector * CD_FRAMESIZE_RAW))
 		goto fail_io;
 	ret = fread(dest, 1, CD_FRAMESIZE_RAW, f);
 	if (ret <= 0)
@@ -1184,7 +1222,7 @@ static int cdread_sub_mixed(FILE *f, unsigned int base, void *dest, int sector)
 		return -1;
 	if (!dest)
 		dest = cdbuffer;
-	if (fseeko(f, base + sector * (CD_FRAMESIZE_RAW + SUB_FRAMESIZE), SEEK_SET))
+	if (cdriso_seek_set(f, base + sector * (CD_FRAMESIZE_RAW + SUB_FRAMESIZE)))
 		goto fail_io;
 	ret = fread(dest, 1, CD_FRAMESIZE_RAW, f);
 	if (ret <= 0)
@@ -1200,7 +1238,7 @@ static int cdread_sub_sub_mixed(FILE *f, int sector, void *buffer)
 {
 	if (!f)
 		return -1;
-	if (fseeko(f, sector * (CD_FRAMESIZE_RAW + SUB_FRAMESIZE) + CD_FRAMESIZE_RAW, SEEK_SET))
+	if (cdriso_seek_set(f, sector * (CD_FRAMESIZE_RAW + SUB_FRAMESIZE) + CD_FRAMESIZE_RAW))
 		goto fail_io;
 	if (fread(buffer, 1, SUB_FRAMESIZE, f) != SUB_FRAMESIZE)
 		goto fail_io;
@@ -1386,7 +1424,7 @@ static int cdread_2048(FILE *f, unsigned int base, void *dest, int sector)
 	if (!f)
 		return -1;
 
-	fseeko(f, base + sector * 2048, SEEK_SET);
+	cdriso_seek_set(f, base + sector * 2048);
 	ret = fread(dst + 12 * 2, 1, 2048, f);
 
 	// not really necessary, fake mode 2 header
