@@ -213,13 +213,14 @@ void rec_munmap_psx_mem() { }
  * dispatch reads mirror copies — they must alias the same physical slot. */
 int rec_mmap_rec_mem()
 {
-	const char *shm_name = "/mipsrec_recram";
 	int   fd = -1;
 	int   n_maps = 0;
 	void *rom = MAP_FAILED;
 
-	fd = shm_open(shm_name, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
-	if (fd < 0) { perror("rec_mmap_rec_mem: shm_open"); return -1; }
+	/* memfd, not a named /dev/shm object: a fixed shm name let any local
+	 * process open (or pre-create) the backing of guest RAM / block ptrs. */
+	fd = memfd_create("mipsrec_recram", MFD_CLOEXEC);
+	if (fd < 0) { perror("rec_mmap_rec_mem: memfd_create"); return -1; }
 	if (ftruncate(fd, REC_RAM_SIZE) < 0) { perror("rec_mmap_rec_mem: ftruncate"); goto fail; }
 
 	for (n_maps = 0; n_maps < 4; n_maps++) {
@@ -239,7 +240,6 @@ int rec_mmap_rec_mem()
 		goto fail;
 	}
 
-	shm_unlink(shm_name);   /* backing stays alive while mapped */
 	close(fd);
 	printf("mipsrec: recRAM mirrored at 0x%llx (mmap block dispatch)\n",
 	       (unsigned long long)REC_RAM_VADDR);
@@ -249,7 +249,7 @@ fail:
 	while (n_maps-- > 0)
 		munmap((void *)(uintptr_t)(REC_RAM_VADDR + (uintptr_t)REC_RAM_SIZE * n_maps), REC_RAM_SIZE);
 	if (rom != MAP_FAILED) munmap(rom, REC_ROM_SIZE);
-	if (fd >= 0) { close(fd); shm_unlink(shm_name); }
+	if (fd >= 0) close(fd);
 	return -1;
 }
 
@@ -397,7 +397,6 @@ static bool rec_mem_mapped;                /* Code ptr arrays mmap'd+mirrored at
  * back to the plain (METHOD-2) map and the emulator still runs, just slower. */
 extern "C" int mipsrec_init_mmap(void)
 {
-	const char *shm_name = "/mipsrec_psxmem";
 	int   fd = -1;
 
 	/* ponytail: PGO profiling only — skip the fixed-VA MAP_FIXED mirror map
@@ -413,8 +412,10 @@ extern "C" int mipsrec_init_mmap(void)
 	}
 
 	/* Shared backing object for the 2MB RAM + its 3 mirrors. */
-	fd = shm_open(shm_name, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
-	if (fd < 0) { perror("mipsrec_init_mmap: shm_open"); goto fail; }
+	/* memfd, not a named /dev/shm object: a fixed shm name let any local
+	 * process open (or pre-create) the backing of guest RAM / block ptrs. */
+	fd = memfd_create("mipsrec_psxmem", MFD_CLOEXEC);
+	if (fd < 0) { perror("mipsrec_init_mmap: memfd_create"); goto fail; }
 	if (ftruncate(fd, 0x200000) < 0) { perror("mipsrec_init_mmap: ftruncate"); goto fail; }
 
 	for (n_ram_maps = 0; n_ram_maps < 4; n_ram_maps++) {
@@ -452,7 +453,6 @@ extern "C" int mipsrec_init_mmap(void)
 	bios = mmap(NULL, 0x80000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	if (bios == MAP_FAILED) { perror("mipsrec_init_mmap: psxR"); goto fail; }
 
-	shm_unlink(shm_name);   /* backing stays alive while mapped */
 	close(fd);
 
 	psxRegs.ptrs.psxM = (u8 *)ram;
@@ -469,7 +469,7 @@ fail:
 	if (hw   != MAP_FAILED) munmap(hw,   0x10000);
 	if (exp  != MAP_FAILED) munmap(exp,  0x800000);
 	if (bios != MAP_FAILED) munmap(bios, 0x80000);
-	if (fd >= 0) { close(fd); shm_unlink(shm_name); }
+	if (fd >= 0) close(fd);
 	psx_mem_mapped = false;
 	printf("mipsrec_init_mmap: failed, falling back to non-mirrored map (slower)\n");
 	return -1;
