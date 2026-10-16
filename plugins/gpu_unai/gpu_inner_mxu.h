@@ -90,6 +90,14 @@ static inline u32 mxu_blend_pair_sub(u32 uSrc, u32 uDst)
 /* Shared 2-pixel lighting core. Texel pair in xr10, 5-bit light lanes in
  * xr7/8/9 (r/g/b), xr14 = 0x001f001f, xr15 = 0x80008000.
  * Returns lit bgr555 pair; equals LightLUT[t5*32+l5] per channel. */
+/* Op order is hand-scheduled for the X1000 interlocks (PM section 2.3):
+ * a D16MADL result read by the next / 2nd-next SIMD op costs +2 / +1, a
+ * D16MIN result read by the next op +1. gcc cannot reorder these (every
+ * MXU macro is asm volatile), so: the texel mask-bit AND (independent)
+ * sits between the last MADL and the first SAR, and the MINs run g, b, r
+ * so the SLL never reads the MIN just before it. Same 19 MXU ops and the
+ * same dataflow as before (XR10 is consumed by the mask AND instead of a
+ * temp), so bit-identical; ~3 interlock cycles fewer per pixel pair. */
 static inline u32 mxu_light_pair(u32 tw)
 {
 	MXU_S32I2M(MXU_XR10, tw);
@@ -101,22 +109,71 @@ static inline u32 mxu_light_pair(u32 tw)
 	MXU_D16MADL(MXU_XR0, MXU_XR11, MXU_XR7, MXU_XR11, MXU_AA, MXU_WW);
 	MXU_D16MADL(MXU_XR0, MXU_XR12, MXU_XR8, MXU_XR12, MXU_AA, MXU_WW);
 	MXU_D16MADL(MXU_XR0, MXU_XR13, MXU_XR9, MXU_XR13, MXU_AA, MXU_WW);
+	MXU_S32AND(MXU_XR10, MXU_XR10, MXU_XR15);           /* mask bit */
 	MXU_Q16SAR(MXU_XR11, MXU_XR11, MXU_XR12, MXU_XR12, 4);
 	MXU_Q16SAR(MXU_XR13, MXU_XR13, MXU_XR0, MXU_XR0, 4);
-	MXU_D16MIN(MXU_XR11, MXU_XR11, MXU_XR14);
 	MXU_D16MIN(MXU_XR12, MXU_XR12, MXU_XR14);
 	MXU_D16MIN(MXU_XR13, MXU_XR13, MXU_XR14);
+	MXU_D16MIN(MXU_XR11, MXU_XR11, MXU_XR14);
 	MXU_Q16SLL(MXU_XR12, MXU_XR12, MXU_XR13, MXU_XR13, 5);
 	MXU_Q16SLL(MXU_XR13, MXU_XR13, MXU_XR0, MXU_XR0, 5);
 	MXU_S32OR(MXU_XR11, MXU_XR11, MXU_XR12);
 	MXU_S32OR(MXU_XR11, MXU_XR11, MXU_XR13);
-	MXU_S32AND(MXU_XR12, MXU_XR10, MXU_XR15);
-	MXU_S32OR(MXU_XR11, MXU_XR11, MXU_XR12);
+	MXU_S32OR(MXU_XR11, MXU_XR11, MXU_XR10);
 	return MXU_S32M2I(MXU_XR11);
 }
 #endif /* GPU_MXU_HOST_TEST (light core) */
 
 /* load gouraud pair-accumulators: xr1/2/3 = [c+dc : c], xr4/5/6 = [2dc : 2dc] */
+#if defined(MXU_S32LDDO) && defined(MXU_S32SFL)
+static_assert(offsetof(gpu_unai_inner_t, gInc) == offsetof(gpu_unai_inner_t, gCol) + 8,
+	      "mxu_gouraud_setup loads gCol/gInc as 4 consecutive words");
+/* EROSQ: built in XR from the packed gcol_t words (raw32[0] = g:r,
+ * raw32[1] = x:b) with 4 loads, 4 per-lane adds and 4 halfword shuffles --
+ * ~11 instructions instead of ~34 GPR pack ops + 6 S32I2M per gouraud span
+ * (Crash averages ~9 px/span, so this is per-span fixed cost). Lane adds
+ * are mod 2^16, exactly the (x & 0xffff) of the GPR version; XR7-13 are
+ * free here (light lanes are rebuilt per pair from XR1-3). */
+static inline void mxu_gouraud_setup(const gpu_unai_inner_t &inn)
+{
+	/* one base register for all four words (gCol/gInc are adjacent) */
+	const char *base = (const char *)&inn.gCol;
+	MXU_S32LDDO(MXU_XR10, base, 0);      /* g  : r  */
+	MXU_S32LDDO(MXU_XR11, base, 4);      /* .. : b  */
+	MXU_S32LDDO(MXU_XR12, base, 8);      /* dg : dr */
+	MXU_S32LDDO(MXU_XR13, base, 12);     /* .. : db */
+	MXU_Q16ADD(MXU_XR8, MXU_XR10, MXU_XR12, MXU_XR0, MXU_WW, MXU_AA);  /* g+dg : r+dr */
+	MXU_Q16ADD(MXU_XR9, MXU_XR11, MXU_XR13, MXU_XR0, MXU_WW, MXU_AA);  /* ..   : b+db */
+	MXU_Q16ADD(MXU_XR7, MXU_XR12, MXU_XR12, MXU_XR0, MXU_WW, MXU_AA);  /* 2dg  : 2dr  */
+	MXU_S32SFL(MXU_XR2, MXU_XR8, MXU_XR10, MXU_XR1, 3);  /* [g+dg:g], [r+dr:r] */
+	MXU_S32SFL(MXU_XR0, MXU_XR9, MXU_XR11, MXU_XR3, 3);  /*           [b+db:b] */
+	MXU_Q16ADD(MXU_XR12, MXU_XR13, MXU_XR13, MXU_XR0, MXU_WW, MXU_AA); /* ..   : 2db  */
+	MXU_S32SFL(MXU_XR5, MXU_XR7, MXU_XR7, MXU_XR4, 3);   /* [2dg:2dg], [2dr:2dr] */
+	MXU_S32SFL(MXU_XR0, MXU_XR12, MXU_XR12, MXU_XR6, 3); /*           [2db:2db] */
+}
+
+/* Same, but for a span whose first pixel was already drawn by a scalar
+ * head step: accumulators start one increment in, [c+2dc : c+dc]. */
+static inline void mxu_gouraud_setup_after_head(const gpu_unai_inner_t &inn)
+{
+	const char *base = (const char *)&inn.gCol;
+	MXU_S32LDDO(MXU_XR10, base, 0);      /* g  : r  */
+	MXU_S32LDDO(MXU_XR11, base, 4);      /* .. : b  */
+	MXU_S32LDDO(MXU_XR12, base, 8);      /* dg : dr */
+	MXU_S32LDDO(MXU_XR13, base, 12);     /* .. : db */
+	MXU_Q16ADD(MXU_XR8, MXU_XR10, MXU_XR12, MXU_XR0, MXU_WW, MXU_AA);  /* c+dc  */
+	MXU_Q16ADD(MXU_XR9, MXU_XR11, MXU_XR13, MXU_XR0, MXU_WW, MXU_AA);
+	MXU_Q16ADD(MXU_XR7, MXU_XR12, MXU_XR12, MXU_XR0, MXU_WW, MXU_AA);  /* 2dc   */
+	MXU_Q16ADD(MXU_XR10, MXU_XR8, MXU_XR12, MXU_XR0, MXU_WW, MXU_AA);  /* c+2dc */
+	MXU_Q16ADD(MXU_XR11, MXU_XR9, MXU_XR13, MXU_XR0, MXU_WW, MXU_AA);
+	MXU_S32SFL(MXU_XR2, MXU_XR10, MXU_XR8, MXU_XR1, 3);  /* [g+2dg:g+dg], [r+2dr:r+dr] */
+	MXU_S32SFL(MXU_XR0, MXU_XR11, MXU_XR9, MXU_XR3, 3);  /*               [b+2db:b+db] */
+	MXU_Q16ADD(MXU_XR12, MXU_XR13, MXU_XR13, MXU_XR0, MXU_WW, MXU_AA);
+	MXU_S32SFL(MXU_XR5, MXU_XR7, MXU_XR7, MXU_XR4, 3);
+	MXU_S32SFL(MXU_XR0, MXU_XR12, MXU_XR12, MXU_XR6, 3);
+}
+#define MXU_GOURAUD_SETUP_IN_XR 1
+#else
 static inline void mxu_gouraud_setup(const gpu_unai_inner_t &inn)
 {
 	u32 r = inn.gCol.c.r, g = inn.gCol.c.g, b = inn.gCol.c.b;
@@ -128,6 +185,7 @@ static inline void mxu_gouraud_setup(const gpu_unai_inner_t &inn)
 	MXU_S32I2M(MXU_XR5, (((2 * dg) & 0xffff) << 16) | ((2 * dg) & 0xffff));
 	MXU_S32I2M(MXU_XR6, (((2 * db) & 0xffff) << 16) | ((2 * db) & 0xffff));
 }
+#endif
 
 static inline void mxu_gouraud_step_pair(void)
 {
@@ -218,7 +276,8 @@ static void poly_mxu_utx_gouraud(const gpu_unai_t &gpu_unai, le16_t *pDst, u32 c
 	u32 r = inn.gCol.c.r, g = inn.gCol.c.g, b = inn.gCol.c.b;
 
 	MXU_S32I2M(MXU_XR16, 1);
-	if ((uintptr_t)pDst & 2) {
+	const bool head = (uintptr_t)pDst & 2;
+	if (head) {
 		*pDst++ = u16_to_le16(((r >> 11) | ((g >> 6) & 0x3e0) | ((b >> 1) & 0x7c00))
 		                      | (MSET ? 0x8000 : 0));
 		r = (u16)(r + inn.gInc.c.r);
@@ -226,6 +285,14 @@ static void poly_mxu_utx_gouraud(const gpu_unai_t &gpu_unai, le16_t *pDst, u32 c
 		b = (u16)(b + inn.gInc.c.b);
 		if (!--count) return;
 	}
+#ifdef MXU_GOURAUD_SETUP_IN_XR
+	/* per-span setup in XR (~15 insns instead of ~30 GPR pack ops); the
+	 * locals r/g/b are then only needed by the scalar head above */
+	if (head)
+		mxu_gouraud_setup_after_head(inn);
+	else
+		mxu_gouraud_setup(inn);
+#else
 	u32 dr = inn.gInc.c.r, dg = inn.gInc.c.g, db = inn.gInc.c.b;
 	MXU_S32I2M(MXU_XR1, (((r + dr) & 0xffff) << 16) | r);
 	MXU_S32I2M(MXU_XR2, (((g + dg) & 0xffff) << 16) | g);
@@ -233,6 +300,7 @@ static void poly_mxu_utx_gouraud(const gpu_unai_t &gpu_unai, le16_t *pDst, u32 c
 	MXU_S32I2M(MXU_XR4, (((2 * dr) & 0xffff) << 16) | ((2 * dr) & 0xffff));
 	MXU_S32I2M(MXU_XR5, (((2 * dg) & 0xffff) << 16) | ((2 * dg) & 0xffff));
 	MXU_S32I2M(MXU_XR6, (((2 * db) & 0xffff) << 16) | ((2 * db) & 0xffff));
+#endif
 	MXU_S32I2M(MXU_XR14, 0x03e003e0);
 	MXU_S32I2M(MXU_XR15, 0x7c007c00);
 	if (MSET)
@@ -294,13 +362,21 @@ static void poly_mxu_utx_blend(const gpu_unai_t &gpu_unai, le16_t *pDst, u32 cou
 		} \
 	} while (0)
 
-	if ((uintptr_t)pDst & 2) {
+	const bool head = (uintptr_t)pDst & 2;
+	if (head) {
 		UTXB_ONE();
 		if (!--count) return;
 	}
 
 	u32 src_pair = pix | (pix << 16);
 	if (GOU) {
+#ifdef MXU_GOURAUD_SETUP_IN_XR
+		/* the head pixel (if any) stepped the accumulators one in */
+		if (head)
+			mxu_gouraud_setup_after_head(inn);
+		else
+			mxu_gouraud_setup(inn);
+#else
 		/* NOT mxu_gouraud_setup(inn): the head pixel may have stepped the
 		 * local accumulators past inn.gCol — load from the locals. */
 		u32 dr = inn.gInc.c.r, dg = inn.gInc.c.g, db = inn.gInc.c.b;
@@ -310,6 +386,7 @@ static void poly_mxu_utx_blend(const gpu_unai_t &gpu_unai, le16_t *pDst, u32 cou
 		MXU_S32I2M(MXU_XR4, (((2 * dr) & 0xffff) << 16) | ((2 * dr) & 0xffff));
 		MXU_S32I2M(MXU_XR5, (((2 * dg) & 0xffff) << 16) | ((2 * dg) & 0xffff));
 		MXU_S32I2M(MXU_XR6, (((2 * db) & 0xffff) << 16) | ((2 * db) & 0xffff));
+#endif
 		MXU_S32I2M(MXU_XR14, 0x03e003e0);
 		MXU_S32I2M(MXU_XR15, 0x7c007c00);
 	}
@@ -419,8 +496,15 @@ static void poly_mxu_tx_lit(const gpu_unai_t &gpu_unai, le16_t *pDst, u32 count)
 			MXU_Q16SLR(MXU_XR7, MXU_XR1, MXU_XR3, MXU_XR9, 11);
 			MXU_Q16SLR(MXU_XR8, MXU_XR2, MXU_XR0, MXU_XR0, 11);
 		}
-		if (t0 | t1) {
+		if (likely(t0 | t1)) {   /* (the CFG differs from the PGO profile
+					  * now, so say which side is hot) */
 			u32 res = mxu_light_pair(((u32)t1 << 16) | t0);
+			/* step here, not after the stores: the 3 Q16ADDs fill the
+			 * S32M2I->GPR latency (+3/+2/+1) of 'res'. The light lanes
+			 * XR7-9 were already taken from XR1-3 above, and blend and
+			 * the stores never touch XR1-6, so this is bit-identical. */
+			if (GOU)
+				mxu_gouraud_step_pair();
 			if (BM >= 0) {
 				u32 m = res & 0x80008000;
 				if (m) {
@@ -435,9 +519,9 @@ static void poly_mxu_tx_lit(const gpu_unai_t &gpu_unai, le16_t *pDst, u32 count)
 			if (MSET) res |= 0x80008000;
 			if (t0) pDst[0] = u16_to_le16((u16)res);
 			if (t1) pDst[1] = u16_to_le16((u16)(res >> 16));
-		}
-		if (GOU)
+		} else if (GOU) {
 			mxu_gouraud_step_pair();
+		}
 		pDst += 2;
 		count -= 2;
 	}
