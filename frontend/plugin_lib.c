@@ -400,6 +400,25 @@ void pl_force_clear(void)
 	flip_clear_counter = 2;
 }
 
+/* EROSQ X1000: every 16bpp blit rewrites its destination row completely, so
+ * the 32 B lines lying wholly inside it can be allocated with pref 30
+ * (PrepareForStore) instead of a write-allocate fill from DDR (xbbench:
+ * 2.7x on a plain fill). Partial head/tail lines are left alone. */
+#if defined(EROSQ) && defined(__mips__)
+#define PL_PREF_STORE(a) __asm__ volatile("pref 30, 0(%0)" :: "r"(a) : "memory")
+#endif
+#ifdef PL_PREF_STORE
+static inline void pl_pref_store_row(void *d, int bytes)
+{
+	uintptr_t a = ((uintptr_t)d + 31) & ~(uintptr_t)31;
+	uintptr_t e = ((uintptr_t)d + bytes) & ~(uintptr_t)31;
+	for (; a < e; a += 32)
+		PL_PREF_STORE(a);
+}
+#else
+static inline void pl_pref_store_row(void *d, int bytes) { (void)d; (void)bytes; }
+#endif
+
 static void pl_vout_flip(const void *vram_, int vram_ofs, int bgr24,
 	int x, int y, int w, int h, int dims_changed)
 {
@@ -538,6 +557,7 @@ static void pl_vout_flip(const void *vram_, int vram_ofs, int bgr24,
 	{
 		unsigned int vram_mask = enhres ? ~0 : 0xfffff;
 		for (h1 = h; h1-- > 0; dest += dstride * 2) {
+			pl_pref_store_row(dest, w * 2);
 			blit(dest, vram + vram_ofs, w);
 			vram_ofs = (vram_ofs + sstride) & vram_mask;
 		}
