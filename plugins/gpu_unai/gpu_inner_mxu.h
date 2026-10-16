@@ -90,6 +90,14 @@ static inline u32 mxu_blend_pair_sub(u32 uSrc, u32 uDst)
 /* Shared 2-pixel lighting core. Texel pair in xr10, 5-bit light lanes in
  * xr7/8/9 (r/g/b), xr14 = 0x001f001f, xr15 = 0x80008000.
  * Returns lit bgr555 pair; equals LightLUT[t5*32+l5] per channel. */
+/* Op order is hand-scheduled for the X1000 interlocks (PM section 2.3):
+ * a D16MADL result read by the next / 2nd-next SIMD op costs +2 / +1, a
+ * D16MIN result read by the next op +1. gcc cannot reorder these (every
+ * MXU macro is asm volatile), so: the texel mask-bit AND (independent)
+ * sits between the last MADL and the first SAR, and the MINs run g, b, r
+ * so the SLL never reads the MIN just before it. Same 19 MXU ops and the
+ * same dataflow as before (XR10 is consumed by the mask AND instead of a
+ * temp), so bit-identical; ~3 interlock cycles fewer per pixel pair. */
 static inline u32 mxu_light_pair(u32 tw)
 {
 	MXU_S32I2M(MXU_XR10, tw);
@@ -101,17 +109,17 @@ static inline u32 mxu_light_pair(u32 tw)
 	MXU_D16MADL(MXU_XR0, MXU_XR11, MXU_XR7, MXU_XR11, MXU_AA, MXU_WW);
 	MXU_D16MADL(MXU_XR0, MXU_XR12, MXU_XR8, MXU_XR12, MXU_AA, MXU_WW);
 	MXU_D16MADL(MXU_XR0, MXU_XR13, MXU_XR9, MXU_XR13, MXU_AA, MXU_WW);
+	MXU_S32AND(MXU_XR10, MXU_XR10, MXU_XR15);           /* mask bit */
 	MXU_Q16SAR(MXU_XR11, MXU_XR11, MXU_XR12, MXU_XR12, 4);
 	MXU_Q16SAR(MXU_XR13, MXU_XR13, MXU_XR0, MXU_XR0, 4);
-	MXU_D16MIN(MXU_XR11, MXU_XR11, MXU_XR14);
 	MXU_D16MIN(MXU_XR12, MXU_XR12, MXU_XR14);
 	MXU_D16MIN(MXU_XR13, MXU_XR13, MXU_XR14);
+	MXU_D16MIN(MXU_XR11, MXU_XR11, MXU_XR14);
 	MXU_Q16SLL(MXU_XR12, MXU_XR12, MXU_XR13, MXU_XR13, 5);
 	MXU_Q16SLL(MXU_XR13, MXU_XR13, MXU_XR0, MXU_XR0, 5);
 	MXU_S32OR(MXU_XR11, MXU_XR11, MXU_XR12);
 	MXU_S32OR(MXU_XR11, MXU_XR11, MXU_XR13);
-	MXU_S32AND(MXU_XR12, MXU_XR10, MXU_XR15);
-	MXU_S32OR(MXU_XR11, MXU_XR11, MXU_XR12);
+	MXU_S32OR(MXU_XR11, MXU_XR11, MXU_XR10);
 	return MXU_S32M2I(MXU_XR11);
 }
 #endif /* GPU_MXU_HOST_TEST (light core) */
@@ -419,8 +427,15 @@ static void poly_mxu_tx_lit(const gpu_unai_t &gpu_unai, le16_t *pDst, u32 count)
 			MXU_Q16SLR(MXU_XR7, MXU_XR1, MXU_XR3, MXU_XR9, 11);
 			MXU_Q16SLR(MXU_XR8, MXU_XR2, MXU_XR0, MXU_XR0, 11);
 		}
-		if (t0 | t1) {
+		if (likely(t0 | t1)) {   /* (the CFG differs from the PGO profile
+					  * now, so say which side is hot) */
 			u32 res = mxu_light_pair(((u32)t1 << 16) | t0);
+			/* step here, not after the stores: the 3 Q16ADDs fill the
+			 * S32M2I->GPR latency (+3/+2/+1) of 'res'. The light lanes
+			 * XR7-9 were already taken from XR1-3 above, and blend and
+			 * the stores never touch XR1-6, so this is bit-identical. */
+			if (GOU)
+				mxu_gouraud_step_pair();
 			if (BM >= 0) {
 				u32 m = res & 0x80008000;
 				if (m) {
@@ -435,9 +450,9 @@ static void poly_mxu_tx_lit(const gpu_unai_t &gpu_unai, le16_t *pDst, u32 count)
 			if (MSET) res |= 0x80008000;
 			if (t0) pDst[0] = u16_to_le16((u16)res);
 			if (t1) pDst[1] = u16_to_le16((u16)(res >> 16));
-		}
-		if (GOU)
+		} else if (GOU) {
 			mxu_gouraud_step_pair();
+		}
 		pDst += 2;
 		count -= 2;
 	}
