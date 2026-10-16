@@ -542,6 +542,101 @@ void bgr555_to_rgb565_512_to_320_avg(void * __restrict__ dst_,
 	uint32_t * __restrict__ dst = dst_;
 	int k;
 
+#if defined(HAVE_bgr555_to_rgb565_mxu) && defined(MXU_S32XOR)
+	/* (MXU_S32XOR check: host harnesses that model only the older ops,
+	 *  e.g. test_cspace_mxu.cpp, keep compiling and take the scalar loop.)
+	 * EROSQ X1000: MXU "Sharp" 512->320, 16 src px -> 10 dst px/iter.
+	 * With Xi = (s[2i+1]:s[2i]) the five output words need the operand
+	 * pairs A/B = (s1:s0)/(s2:s1), (s4:s3)/(s5:s4), (s8:s6)/(s9:s7),
+	 * (s11:s9)/(s12:s10), (s14:s12)/(s15:s13): two S32ALNI + four S32SFL
+	 * halfword shuffles. avg555x2 maps 1:1 onto XR ops (XOR, AND mask,
+	 * per-lane >>1, AND, per-lane add: every channel sum stays <= 31, so
+	 * no lane overflows), then the proven bgr555 convert pipeline.
+	 * ~7 vs ~10.4 ins/px for the scalar loop below. Bit-exact
+	 * (test_cspace_avg_mxu.cpp). src must be 4-aligned, else the scalar
+	 * loop takes the whole row. */
+	if (!((uintptr_t)src & 3)) {
+		MXU_S32I2M(MXU_XR16, 1);          /* enable MXU ALU */
+		MXU_S32I2M(MXU_XR14, 0x7bde7bde); /* avg555x2 channel-LSB mask */
+		MXU_S32I2M(MXU_XR15, 0x07c007c0); /* green mask */
+
+		for (; dpixels >= 10; dpixels -= 10, src += 16, dst += 5) {
+			__builtin_prefetch(src + 48);
+			/* ---- words 0,1: X0..X2 ---- */
+			MXU_S32LDD(MXU_XR1, src);        /* s1 :s0  = A0 */
+			MXU_S32LDD(MXU_XR2, src + 2);    /* s3 :s2       */
+			MXU_S32LDD(MXU_XR3, src + 4);    /* s5 :s4  = B1 */
+			MXU_S32ALNI(MXU_XR4, MXU_XR2, MXU_XR1, 2);  /* s2:s1 = B0 */
+			MXU_S32ALNI(MXU_XR5, MXU_XR3, MXU_XR2, 2);  /* s4:s3 = A1 */
+			MXU_S32XOR(MXU_XR6, MXU_XR1, MXU_XR4);
+			MXU_S32XOR(MXU_XR7, MXU_XR5, MXU_XR3);
+			MXU_S32AND(MXU_XR6, MXU_XR6, MXU_XR14);
+			MXU_S32AND(MXU_XR7, MXU_XR7, MXU_XR14);
+			MXU_Q16SLR(MXU_XR6, MXU_XR6, MXU_XR7, MXU_XR7, 1);
+			MXU_S32AND(MXU_XR1, MXU_XR1, MXU_XR4);
+			MXU_S32AND(MXU_XR3, MXU_XR5, MXU_XR3);
+			MXU_Q16ADD(MXU_XR1, MXU_XR1, MXU_XR6, MXU_XR0, MXU_WW, MXU_AA);
+			MXU_Q16ADD(MXU_XR3, MXU_XR3, MXU_XR7, MXU_XR0, MXU_WW, MXU_AA);
+			/* convert pair (XR1, XR3) -> dst[0..1] */
+			MXU_Q16SLL(MXU_XR4, MXU_XR1, MXU_XR3, MXU_XR5, 1);
+			MXU_Q16SLL(MXU_XR6, MXU_XR1, MXU_XR3, MXU_XR7, 11);
+			MXU_Q16SLR(MXU_XR8, MXU_XR4, MXU_XR5, MXU_XR9, 11);
+			MXU_S32AND(MXU_XR4, MXU_XR4, MXU_XR15);
+			MXU_S32AND(MXU_XR5, MXU_XR5, MXU_XR15);
+			MXU_S32OR(MXU_XR6, MXU_XR6, MXU_XR4);
+			MXU_S32OR(MXU_XR6, MXU_XR6, MXU_XR8);
+			MXU_S32OR(MXU_XR7, MXU_XR7, MXU_XR5);
+			MXU_S32OR(MXU_XR7, MXU_XR7, MXU_XR9);
+			MXU_S32STD(MXU_XR6, dst);
+			MXU_S32STD(MXU_XR7, dst + 1);
+			/* ---- words 2,3,4: X3..X7 ---- */
+			MXU_S32LDD(MXU_XR1, src + 6);    /* s7 :s6  */
+			MXU_S32LDD(MXU_XR2, src + 8);    /* s9 :s8  */
+			MXU_S32LDD(MXU_XR3, src + 10);   /* s11:s10 */
+			MXU_S32LDD(MXU_XR4, src + 12);   /* s13:s12 */
+			MXU_S32LDD(MXU_XR5, src + 14);   /* s15:s14 */
+			MXU_S32SFL(MXU_XR6, MXU_XR2, MXU_XR1, MXU_XR7, 3);   /* B2=s9:s7  A2=s8:s6 */
+			MXU_S32SFL(MXU_XR8, MXU_XR3, MXU_XR2, MXU_XR0, 3);   /* A3=s11:s9 */
+			MXU_S32SFL(MXU_XR0, MXU_XR4, MXU_XR3, MXU_XR9, 3);   /* B3=s12:s10 */
+			MXU_S32SFL(MXU_XR10, MXU_XR5, MXU_XR4, MXU_XR11, 3); /* B4=s15:s13 A4=s14:s12 */
+			MXU_S32XOR(MXU_XR1, MXU_XR7, MXU_XR6);
+			MXU_S32XOR(MXU_XR2, MXU_XR8, MXU_XR9);
+			MXU_S32XOR(MXU_XR3, MXU_XR11, MXU_XR10);
+			MXU_S32AND(MXU_XR1, MXU_XR1, MXU_XR14);
+			MXU_S32AND(MXU_XR2, MXU_XR2, MXU_XR14);
+			MXU_S32AND(MXU_XR3, MXU_XR3, MXU_XR14);
+			MXU_Q16SLR(MXU_XR1, MXU_XR1, MXU_XR2, MXU_XR2, 1);
+			MXU_Q16SLR(MXU_XR3, MXU_XR3, MXU_XR0, MXU_XR0, 1);
+			MXU_S32AND(MXU_XR7, MXU_XR7, MXU_XR6);
+			MXU_S32AND(MXU_XR8, MXU_XR8, MXU_XR9);
+			MXU_S32AND(MXU_XR11, MXU_XR11, MXU_XR10);
+			MXU_Q16ADD(MXU_XR7, MXU_XR7, MXU_XR1, MXU_XR0, MXU_WW, MXU_AA);
+			MXU_Q16ADD(MXU_XR8, MXU_XR8, MXU_XR2, MXU_XR0, MXU_WW, MXU_AA);
+			MXU_Q16ADD(MXU_XR11, MXU_XR11, MXU_XR3, MXU_XR0, MXU_WW, MXU_AA);
+			/* convert pair (XR7, XR8) -> dst[2..3] */
+			MXU_Q16SLL(MXU_XR1, MXU_XR7, MXU_XR8, MXU_XR2, 1);
+			MXU_Q16SLL(MXU_XR3, MXU_XR7, MXU_XR8, MXU_XR4, 11);
+			MXU_Q16SLR(MXU_XR5, MXU_XR1, MXU_XR2, MXU_XR6, 11);
+			MXU_S32AND(MXU_XR1, MXU_XR1, MXU_XR15);
+			MXU_S32AND(MXU_XR2, MXU_XR2, MXU_XR15);
+			MXU_S32OR(MXU_XR3, MXU_XR3, MXU_XR1);
+			MXU_S32OR(MXU_XR3, MXU_XR3, MXU_XR5);
+			MXU_S32OR(MXU_XR4, MXU_XR4, MXU_XR2);
+			MXU_S32OR(MXU_XR4, MXU_XR4, MXU_XR6);
+			MXU_S32STD(MXU_XR3, dst + 2);
+			MXU_S32STD(MXU_XR4, dst + 3);
+			/* convert single (XR11) -> dst[4] */
+			MXU_Q16SLL(MXU_XR1, MXU_XR11, MXU_XR0, MXU_XR0, 1);
+			MXU_Q16SLL(MXU_XR3, MXU_XR11, MXU_XR0, MXU_XR0, 11);
+			MXU_Q16SLR(MXU_XR5, MXU_XR1, MXU_XR0, MXU_XR0, 11);
+			MXU_S32AND(MXU_XR1, MXU_XR1, MXU_XR15);
+			MXU_S32OR(MXU_XR3, MXU_XR3, MXU_XR1);
+			MXU_S32OR(MXU_XR3, MXU_XR3, MXU_XR5);
+			MXU_S32STD(MXU_XR3, dst + 4);
+		}
+	}
+#endif
+
 	for (; dpixels >= 10; dpixels -= 10, src += 16, dst += 5)
 		for (k = 0; k < 5; k++)
 			dst[k] = bgr555_to_rgb565_pair(AVG_PAIR(src, k));
