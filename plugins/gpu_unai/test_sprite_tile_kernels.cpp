@@ -149,6 +149,39 @@ static void run_sprite_case(const char *name, spritefn fn, int trial)
 	}
 }
 
+/* unlit textured poly spans: scalar gpuPolySpanFn<CF> vs the dispatcher
+ * (poly_fast_unlit). Random 22.10 u/v + signed steps, masks incl. wrap,
+ * transparent CLUT entries; 1 trial in 8 with pixel-skip on (must bail). */
+template<int CF>
+static void run_poly_case(const char *name, int trial)
+{
+	fill_random();
+	gpu_unai_inner_t &inn = gpu_unai.inn;
+	memset(&inn, 0, sizeof(inn));
+	u32 umask_pool[4] = { 0xff, 0x3f, 0x1f, 0xef };
+	u32 vmask = (rnd() & 1) ? 0xff : 0x3f;
+	inn.mask_v00u = (vmask << 24) | umask_pool[rnd() % 4];
+	inn.u = rnd() % (256 << 10);
+	inn.v = rnd() % (256 << 10);
+	inn.u_inc = (s32)(rnd() % (4 << 10)) - (2 << 10);
+	inn.v_inc = (s32)(rnd() % (4 << 10)) - (2 << 10);
+	inn.TBA = (const le16_t *)tex;
+	inn.CBA = clut;
+	u32 count = 1 + rnd() % 60;
+	u32 dst_off = rnd() % (FRAME_WIDTH - 64);
+	pskip_mask2 = (rnd() % 8 == 0) ? 0x4a : 0;
+	mxu_spans_on = 0;
+	gpuPolySpanFn<CF>(gpu_unai, &bufA[dst_off], count, 0);
+	mxu_spans_on = 1;
+	PolySpanMaybeMXU<CF>(gpu_unai, &bufB[dst_off], count, 0);
+	pskip_mask2 = 0;
+	if (memcmp(bufA, bufB, sizeof(bufA)) != 0) {
+		printf("FAIL %s trial %d [u=%u v=%u du=%d dv=%d count=%u mask=%08x]\n",
+		       name, trial, inn.u, inn.v, inn.u_inc, inn.v_inc, count, inn.mask_v00u);
+		fails++;
+	}
+}
+
 template<int CF>
 static void run_tile_case(const char *name, int trial)
 {
@@ -198,6 +231,12 @@ int main(void)
 		run_sprite_case("spr-0x163", SpriteMaybeMXU<0x163>, t);
 		run_sprite_case("spr-0x020", SpriteMaybeMXU<0x020>, t);
 		run_sprite_case("spr-0x120", SpriteMaybeMXU<0x120>, t);
+		run_poly_case<0x020>("poly-0x020", t);
+		run_poly_case<0x040>("poly-0x040", t);
+		run_poly_case<0x060>("poly-0x060", t);
+		run_poly_case<0x120>("poly-0x120", t);
+		run_poly_case<0x140>("poly-0x140", t);
+		run_poly_case<0x160>("poly-0x160", t);
 		run_tile_case<0x002>("tile-0x002", t);
 		run_tile_case<0x00a>("tile-0x00a", t);
 		run_tile_case<0x012>("tile-0x012", t);
@@ -209,6 +248,6 @@ int main(void)
 		if (fails > 10) break;
 	}
 	if (fails) { printf("FAILED: %d mismatching trials\n", fails); return 1; }
-	printf("PASS: %d trials x 6 sprite CFs + 8 tile CFs, all bit-exact\n", N);
+	printf("PASS: %d trials x 6 sprite CFs + 6 poly CFs + 8 tile CFs, all bit-exact\n", N);
 	return 0;
 }

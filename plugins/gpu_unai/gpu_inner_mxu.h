@@ -624,6 +624,39 @@ static void SpriteMaybeMXU(le16_t *pPixel, u32 count, const u8 *pTxt_base,
 	gpuSpriteDriverFn<CF>(pPixel, count, pTxt_base, inn);
 }
 
+/* CF 0x020/0x040/0x060 (+0x100 MASKSET): unlit textured polys, no blend,
+ * maskcheck or dither. GT2's hottest function (CF 0x020 via the flat-lit
+ * prelight redirect, 15% of its CPU) and Ape's #1. The scalar loop is one
+ * serial address->texel->CLUT->test->store chain per pixel; four texels per
+ * iteration with the fetches hoisted lets the in-order core overlap the
+ * loads. Same fetch code as the MXU kernels (mxu_fetch_texel), same order of
+ * u/v steps, so output is identical. Not used while pixel-skip is active
+ * (caller bails), so skipped columns stay untouched exactly as before. */
+template<int TM, bool MSET>
+static void poly_fast_unlit(const gpu_unai_t &gpu_unai, le16_t *pDst, u32 count)
+{
+	u32 l_u = gpu_unai.inn.u, l_v = gpu_unai.inn.v << 1;
+	const s32 du = gpu_unai.inn.u_inc, dv = gpu_unai.inn.v_inc << 1;
+	const u32 mask_v00u = gpu_unai.inn.mask_v00u;
+	const le16_t *TBA_ = gpu_unai.inn.TBA;
+	const le16_t *CBA_ = gpu_unai.inn.CBA;
+#define PFU_PUT(d, t) do { if (t) (d) = u16_to_le16((u16)(MSET ? ((t) | 0x8000) : (t))); } while (0)
+	for (; count >= 4; count -= 4, pDst += 4) {
+		u32 t0 = mxu_fetch_texel<TM>(l_u,          l_v,          mask_v00u, TBA_, CBA_);
+		u32 t1 = mxu_fetch_texel<TM>(l_u + du,     l_v + dv,     mask_v00u, TBA_, CBA_);
+		u32 t2 = mxu_fetch_texel<TM>(l_u + 2 * du, l_v + 2 * dv, mask_v00u, TBA_, CBA_);
+		u32 t3 = mxu_fetch_texel<TM>(l_u + 3 * du, l_v + 3 * dv, mask_v00u, TBA_, CBA_);
+		l_u += 4 * du; l_v += 4 * dv;
+		PFU_PUT(pDst[0], t0); PFU_PUT(pDst[1], t1);
+		PFU_PUT(pDst[2], t2); PFU_PUT(pDst[3], t3);
+	}
+	for (; count; count--, pDst++, l_u += du, l_v += dv) {
+		u32 t = mxu_fetch_texel<TM>(l_u, l_v, mask_v00u, TBA_, CBA_);
+		PFU_PUT(pDst[0], t);
+	}
+#undef PFU_PUT
+}
+
 /* forward decl; template defined below in gpu_inner.h */
 template<int CF>
 static noinline void gpuPolySpanFn(const gpu_unai_t &gpu_unai, le16_t *pDst, u32 count, s32 y);
@@ -643,6 +676,12 @@ static void PolySpanMaybeMXU(const gpu_unai_t &gpu_unai, le16_t *pDst, u32 count
 		fn; return; \
 	} while (0)
 		switch (CF) {
+		case 0x020: if (!pskip_mask2) MXU_TAKE((poly_fast_unlit<1, false>(gpu_unai, pDst, count))); break;
+		case 0x040: if (!pskip_mask2) MXU_TAKE((poly_fast_unlit<2, false>(gpu_unai, pDst, count))); break;
+		case 0x060: if (!pskip_mask2) MXU_TAKE((poly_fast_unlit<3, false>(gpu_unai, pDst, count))); break;
+		case 0x120: if (!pskip_mask2) MXU_TAKE((poly_fast_unlit<1, true >(gpu_unai, pDst, count))); break;
+		case 0x140: if (!pskip_mask2) MXU_TAKE((poly_fast_unlit<2, true >(gpu_unai, pDst, count))); break;
+		case 0x160: if (!pskip_mask2) MXU_TAKE((poly_fast_unlit<3, true >(gpu_unai, pDst, count))); break;
 		case 0x000: MXU_TAKE((poly_mxu_flat_fill<false>(gpu_unai, pDst, count)));
 		case 0x100: MXU_TAKE((poly_mxu_flat_fill<true >(gpu_unai, pDst, count)));
 		case 0x081: MXU_TAKE((poly_mxu_utx_gouraud<false>(gpu_unai, pDst, count)));
