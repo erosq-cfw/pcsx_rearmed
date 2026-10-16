@@ -237,6 +237,30 @@ int main(void)
 		run_poly_case<0x120>("poly-0x120", t);
 		run_poly_case<0x140>("poly-0x140", t);
 		run_poly_case<0x160>("poly-0x160", t);
+		run_poly_case<0x022>("poly-0x022", t);
+		run_poly_case<0x02a>("poly-0x02a", t);
+		run_poly_case<0x032>("poly-0x032", t);
+		run_poly_case<0x03a>("poly-0x03a", t);
+		run_poly_case<0x122>("poly-0x122", t);
+		run_poly_case<0x12a>("poly-0x12a", t);
+		run_poly_case<0x132>("poly-0x132", t);
+		run_poly_case<0x13a>("poly-0x13a", t);
+		run_poly_case<0x042>("poly-0x042", t);
+		run_poly_case<0x04a>("poly-0x04a", t);
+		run_poly_case<0x052>("poly-0x052", t);
+		run_poly_case<0x05a>("poly-0x05a", t);
+		run_poly_case<0x142>("poly-0x142", t);
+		run_poly_case<0x14a>("poly-0x14a", t);
+		run_poly_case<0x152>("poly-0x152", t);
+		run_poly_case<0x15a>("poly-0x15a", t);
+		run_poly_case<0x062>("poly-0x062", t);
+		run_poly_case<0x06a>("poly-0x06a", t);
+		run_poly_case<0x072>("poly-0x072", t);
+		run_poly_case<0x07a>("poly-0x07a", t);
+		run_poly_case<0x162>("poly-0x162", t);
+		run_poly_case<0x16a>("poly-0x16a", t);
+		run_poly_case<0x172>("poly-0x172", t);
+		run_poly_case<0x17a>("poly-0x17a", t);
 		run_tile_case<0x002>("tile-0x002", t);
 		run_tile_case<0x00a>("tile-0x00a", t);
 		run_tile_case<0x012>("tile-0x012", t);
@@ -248,6 +272,6 @@ int main(void)
 		if (fails > 10) break;
 	}
 	if (fails) { printf("FAILED: %d mismatching trials\n", fails); return 1; }
-	printf("PASS: %d trials x 6 sprite CFs + 6 poly CFs + 8 tile CFs, all bit-exact\n", N);
+	printf("PASS: %d trials x 6 sprite CFs + 30 poly CFs + 8 tile CFs, all bit-exact\n", N);
 	return 0;
 }

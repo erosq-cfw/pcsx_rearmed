@@ -632,7 +632,7 @@ static void SpriteMaybeMXU(le16_t *pPixel, u32 count, const u8 *pTxt_base,
  * loads. Same fetch code as the MXU kernels (mxu_fetch_texel), same order of
  * u/v steps, so output is identical. Not used while pixel-skip is active
  * (caller bails), so skipped columns stay untouched exactly as before. */
-template<int TM, bool MSET>
+template<int TM, bool MSET, int BM = -1>
 static void poly_fast_unlit(const gpu_unai_t &gpu_unai, le16_t *pDst, u32 count)
 {
 	u32 l_u = gpu_unai.inn.u, l_v = gpu_unai.inn.v << 1;
@@ -640,7 +640,12 @@ static void poly_fast_unlit(const gpu_unai_t &gpu_unai, le16_t *pDst, u32 count)
 	const u32 mask_v00u = gpu_unai.inn.mask_v00u;
 	const le16_t *TBA_ = gpu_unai.inn.TBA;
 	const le16_t *CBA_ = gpu_unai.inn.CBA;
-#define PFU_PUT(d, t) do { if (t) (d) = u16_to_le16((u16)(MSET ? ((t) | 0x8000) : (t))); } while (0)
+	/* BM >= 0 (CF BLEND): texels with bit15 set blend with dst, exactly the
+	 * scalar tail: gpuBlending<BM,false>(src, dst) | 0x8000 */
+#define PFU_PUT(d, t) do { u32 t_ = (t); if (t_) { \
+		if (BM >= 0 && (t_ & 0x8000)) \
+			t_ = gpuBlending<(BM < 0 ? 0 : BM), false>(t_, le16_to_u16(d)) | 0x8000; \
+		(d) = u16_to_le16((u16)(MSET ? (t_ | 0x8000) : t_)); } } while (0)
 	for (; count >= 4; count -= 4, pDst += 4) {
 		u32 t0 = mxu_fetch_texel<TM>(l_u,          l_v,          mask_v00u, TBA_, CBA_);
 		u32 t1 = mxu_fetch_texel<TM>(l_u + du,     l_v + dv,     mask_v00u, TBA_, CBA_);
@@ -676,12 +681,20 @@ static void PolySpanMaybeMXU(const gpu_unai_t &gpu_unai, le16_t *pDst, u32 count
 		fn; return; \
 	} while (0)
 		switch (CF) {
-		case 0x020: if (!pskip_mask2) MXU_TAKE((poly_fast_unlit<1, false>(gpu_unai, pDst, count))); break;
-		case 0x040: if (!pskip_mask2) MXU_TAKE((poly_fast_unlit<2, false>(gpu_unai, pDst, count))); break;
-		case 0x060: if (!pskip_mask2) MXU_TAKE((poly_fast_unlit<3, false>(gpu_unai, pDst, count))); break;
-		case 0x120: if (!pskip_mask2) MXU_TAKE((poly_fast_unlit<1, true >(gpu_unai, pDst, count))); break;
-		case 0x140: if (!pskip_mask2) MXU_TAKE((poly_fast_unlit<2, true >(gpu_unai, pDst, count))); break;
-		case 0x160: if (!pskip_mask2) MXU_TAKE((poly_fast_unlit<3, true >(gpu_unai, pDst, count))); break;
+		/* unlit textured (+MASKSET, +BLEND modes 0-3); scalar while pskip is on */
+#define PFU_CASE(cf, TM, MS, BM) \
+		case (cf): if (!pskip_mask2) MXU_TAKE((poly_fast_unlit<TM, MS, BM>(gpu_unai, pDst, count))); break;
+#define PFU_TM(base, TM) \
+		PFU_CASE((base),         TM, false, -1) PFU_CASE((base)|0x100,         TM, true, -1) \
+		PFU_CASE((base)|0x002,   TM, false,  0) PFU_CASE((base)|0x102,         TM, true,  0) \
+		PFU_CASE((base)|0x00a,   TM, false,  1) PFU_CASE((base)|0x10a,         TM, true,  1) \
+		PFU_CASE((base)|0x012,   TM, false,  2) PFU_CASE((base)|0x112,         TM, true,  2) \
+		PFU_CASE((base)|0x01a,   TM, false,  3) PFU_CASE((base)|0x11a,         TM, true,  3)
+		PFU_TM(0x020, 1)
+		PFU_TM(0x040, 2)
+		PFU_TM(0x060, 3)
+#undef PFU_TM
+#undef PFU_CASE
 		case 0x000: MXU_TAKE((poly_mxu_flat_fill<false>(gpu_unai, pDst, count)));
 		case 0x100: MXU_TAKE((poly_mxu_flat_fill<true >(gpu_unai, pDst, count)));
 		case 0x081: MXU_TAKE((poly_mxu_utx_gouraud<false>(gpu_unai, pDst, count)));
