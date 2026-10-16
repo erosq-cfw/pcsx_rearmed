@@ -611,7 +611,7 @@ static void SpriteNULL(le16_t *pPixel, u32 count, const u8 *pTxt_base,
 	TN,            TN,            TI((ub)|0x2a), TA6((ub)|0x2b),TN,            TN,            TI((ub)|0x2e), TI((ub)|0x2f), \
 	TN,            TN,            TI((ub)|0x32), TI((ub)|0x33), TN,            TN,            TI((ub)|0x36), TI((ub)|0x37), \
 	TN,            TN,            TI((ub)|0x3a), TI((ub)|0x3b), TN,            TN,            TI((ub)|0x3e), TI((ub)|0x3f), \
-	TA((ub)|0x40), TA6((ub)|0x41),TA6((ub)|0x42),TA6((ub)|0x43),TI((ub)|0x44), TI((ub)|0x45), TI((ub)|0x46), TI((ub)|0x47), \
+	TAX((ub)|0x40),TA6((ub)|0x41),TA6((ub)|0x42),TA6((ub)|0x43),TI((ub)|0x44), TI((ub)|0x45), TI((ub)|0x46), TI((ub)|0x47), \
 	TN,            TN,            TI((ub)|0x4a), TA6((ub)|0x4b),TN,            TN,            TI((ub)|0x4e), TI((ub)|0x4f), \
 	TN,            TN,            TI((ub)|0x52), TI((ub)|0x53), TN,            TN,            TI((ub)|0x56), TI((ub)|0x57), \
 	TN,            TN,            TI((ub)|0x5a), TI((ub)|0x5b), TN,            TN,            TI((ub)|0x5e), TI((ub)|0x5f), \

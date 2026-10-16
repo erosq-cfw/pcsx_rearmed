@@ -671,6 +671,44 @@ static void sprite_fast_unlit_4bpp(le16_t *pPixel, u32 count, const u8 *pTxt_bas
 	}
 }
 
+/* 8bpp unlit sprites (CF 0x040/0x140): Crash's #1 textured loop, Ape's
+ * SPR 0x040. The scalar driver is one serial lbu->lhu->beqz->sh chain per
+ * pixel (in-order core: every load-use stall exposed). Four pixels per
+ * iteration with all loads hoisted lets the core overlap them. Same no-wrap
+ * precondition as the other fast sprite kernels (checked by the caller).
+ * Writes pskip columns too, like sprite_fast_unlit_4bpp (they are never
+ * presented, so display output is identical). */
+template<bool MSET>
+static void sprite_fast_unlit_8bpp(le16_t *pPixel, u32 count, const u8 *pTxt_base,
+	const gpu_unai_inner_t &inn)
+{
+	const u32 u_base = inn.u & (inn.mask_v00u & 0xff);
+	const u32 v_mask = inn.mask_v00u >> 24;
+	const le16_t *CBA_ = inn.CBA;
+	s32 y0 = inn.y0, y1 = inn.y1, li = inn.ilace_mask;
+	u32 v0 = inn.v;
+#define SPR8_PUT(d, t) do { if (t) (d) = u16_to_le16((u16)(MSET ? ((t) | 0x8000) : (t))); } while (0)
+
+	for (; y0 < y1; ++y0, pPixel += FRAME_WIDTH, ++v0) {
+		if (y0 & li) continue;
+		const u8 *pT = pTxt_base + (v0 & v_mask) * 2048 + u_base;
+		le16_t *pDst = pPixel;
+		u32 n = count;
+		for (; n >= 4; n -= 4, pT += 4, pDst += 4) {
+			u32 b0 = pT[0], b1 = pT[1], b2 = pT[2], b3 = pT[3];
+			u32 t0 = le16_to_u16(CBA_[b0]), t1 = le16_to_u16(CBA_[b1]);
+			u32 t2 = le16_to_u16(CBA_[b2]), t3 = le16_to_u16(CBA_[b3]);
+			SPR8_PUT(pDst[0], t0); SPR8_PUT(pDst[1], t1);
+			SPR8_PUT(pDst[2], t2); SPR8_PUT(pDst[3], t3);
+		}
+		for (; n; n--, pT++, pDst++) {
+			u32 t = le16_to_u16(CBA_[*pT]);
+			SPR8_PUT(pDst[0], t);
+		}
+	}
+#undef SPR8_PUT
+}
+
 /* forward decl; template defined below in gpu_inner.h */
 template<int CF>
 static noinline void gpuSpriteDriverFn(le16_t *pPixel, u32 count, const u8 *pTxt_base,
@@ -702,6 +740,8 @@ static void SpriteMaybeMXU(le16_t *pPixel, u32 count, const u8 *pTxt_base,
 		case 0x163: MXU_STAKE((sprite_mxu_lit<3,  0, true >(pPixel, count, pTxt_base, inn)));
 		case 0x020: MXU_STAKE((sprite_fast_unlit_4bpp<false>(pPixel, count, pTxt_base, inn)));
 		case 0x120: MXU_STAKE((sprite_fast_unlit_4bpp<true >(pPixel, count, pTxt_base, inn)));
+		case 0x040: MXU_STAKE((sprite_fast_unlit_8bpp<false>(pPixel, count, pTxt_base, inn)));
+		case 0x140: MXU_STAKE((sprite_fast_unlit_8bpp<true >(pPixel, count, pTxt_base, inn)));
 		}
 #undef MXU_STAKE
 	}
