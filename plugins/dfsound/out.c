@@ -39,8 +39,20 @@ void SetupSound(void)
 	}
 
 	/* ponytail: benchmark knob — PCSX_NOAUDIO forces the null driver so audio
-	 * consumption stops pacing the emulator to realtime (raw throughput A/B) */
+	 * consumption stops pacing the emulator to realtime (raw throughput A/B).
+	 * The libretro build registers no "none" driver, so the filter below would
+	 * reject every candidate and fall into the abort(). Only honour the knob if
+	 * the driver it selects actually exists. */
 	const char *noaudio = getenv("PCSX_NOAUDIO");
+	if (noaudio != NULL) {
+		for (i = 0; i < driver_count; i++)
+			if (strcmp(out_drivers[i].name, "none") == 0)
+				break;
+		if (i >= driver_count) {
+			printf("PCSX_NOAUDIO: no null driver in this build, ignored\n");
+			noaudio = NULL;
+		}
+	}
 	for (i = 0; i < driver_count; i++) {
 		if (noaudio && strcmp(out_drivers[i].name, "none") != 0)
 			continue;

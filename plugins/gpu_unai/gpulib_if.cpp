@@ -69,9 +69,24 @@ extern "C" {
 
 #if defined(__mips__) && defined(GPU_UNAI_USE_MXU)
 #include <signal.h>
-static void gpu_hist_dump(int sig)
+/* SIGUSR1 is shared: plat_erosq.c owns it for the shot.ppm dump and installs
+ * its handler first (plat_init runs before emu_core_init -> renderer_init).
+ * Chain to whatever was there instead of replacing it, and -- like every other
+ * erosq diagnostic -- only set a flag here: the dump is ~3000 fprintf calls and
+ * would deadlock against the emu thread's stdio lock if run in signal context.
+ * Serviced at the top of renderer_do_cmd_list. */
+static void (*gpu_hist_prev_usr1)(int);
+static volatile sig_atomic_t gpu_hist_want_dump;
+static void gpu_hist_sig(int sig)
 {
-  (void)sig;
+  gpu_hist_want_dump = 1;
+  if (gpu_hist_prev_usr1 != SIG_DFL && gpu_hist_prev_usr1 != SIG_IGN
+      && gpu_hist_prev_usr1 != SIG_ERR && gpu_hist_prev_usr1 != NULL)
+    gpu_hist_prev_usr1(sig);
+}
+
+static void gpu_hist_dump(void)
+{
   fprintf(stderr, "[gpu] CF span histogram (spans/pixels):\n");
   for (int i = 0; i < 1024; i++)
     if (gpu_hist_span[i])
@@ -105,13 +120,22 @@ static void mxu_spans_init(void)
   e = getenv("EROSQ_GPU_HIST");
   if (e && atoi(e)) {
     gpu_hist_on = 1;
-    signal(SIGUSR1, gpu_hist_dump);
+    gpu_hist_prev_usr1 = signal(SIGUSR1, gpu_hist_sig);
   }
   fprintf(stderr, "[gpu] MXU spans: %s  prelight_mode=%d\n",
           mxu_spans_on ? "on" : "off", prelight_mode);
 }
+
+static inline void gpu_hist_service(void)
+{
+  if (unlikely(gpu_hist_want_dump)) {
+    gpu_hist_want_dump = 0;
+    gpu_hist_dump();
+  }
+}
 #else
 #define mxu_spans_init()
+#define gpu_hist_service()
 #endif
 
 int renderer_init(void)
@@ -368,6 +392,8 @@ int renderer_do_cmd_list(u32 *list_, int list_len, uint32_t *ex_regs,
   }
 
   unsigned long long _pt0 = g_prof_on ? prof_now_ns() : 0;
+
+  gpu_hist_service();   /* deferred SIGUSR1 histogram dump, not signal context */
 
   for (; list < list_end; list += 1 + len)
   {

@@ -216,7 +216,9 @@ static void fault_init(void)
 static uintptr_t g_jit_lo, g_jit_hi;
 static volatile unsigned long g_smp_jit, g_smp_nat;
 #define SMP_MAX 262144
-static unsigned g_smp_pc[SMP_MAX];
+/* 1MiB. Allocated only when EROSQ_SAMPLE is set -- as BSS it was reserved in
+ * every shipping image for a tool nobody runs on-device. */
+static unsigned *g_smp_pc;
 static volatile unsigned g_smp_n;
 static volatile sig_atomic_t g_want_smpdump;
 static void prof_sig(int sig, siginfo_t *si, void *ucv)
@@ -245,6 +247,11 @@ static void sampler_init(void)
 	struct sigaction sa;
 	struct itimerval it;
 	if (!getenv("EROSQ_SAMPLE")) return;
+	g_smp_pc = malloc(SMP_MAX * sizeof(*g_smp_pc));
+	if (!g_smp_pc) {
+		fprintf(stderr, "SAMPLE: no memory for %u samples, off\n", SMP_MAX);
+		return;
+	}
 	mipsrec_code_range(&g_jit_lo, &g_jit_hi);
 	memset(&sa, 0, sizeof sa);
 	sa.sa_sigaction = prof_sig;
@@ -405,8 +412,10 @@ void plat_finish(void)
 {
 	gov_restore();
 	drm_close();
+	drm_buf = NULL;     /* drm_close munmaps it; g_direct paths must not reuse it */
 	free(shadow_fb);    shadow_fb = NULL;
 	free(menu_fb);      menu_fb = NULL;
+	free(g_menubg_ptr); g_menubg_ptr = NULL;
 }
 
 void plat_gvideo_open(int is_pal)
