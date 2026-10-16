@@ -145,12 +145,34 @@ static inline void mxu_gouraud_setup(const gpu_unai_inner_t &inn)
 	MXU_Q16ADD(MXU_XR8, MXU_XR10, MXU_XR12, MXU_XR0, MXU_WW, MXU_AA);  /* g+dg : r+dr */
 	MXU_Q16ADD(MXU_XR9, MXU_XR11, MXU_XR13, MXU_XR0, MXU_WW, MXU_AA);  /* ..   : b+db */
 	MXU_Q16ADD(MXU_XR7, MXU_XR12, MXU_XR12, MXU_XR0, MXU_WW, MXU_AA);  /* 2dg  : 2dr  */
-	MXU_Q16ADD(MXU_XR12, MXU_XR13, MXU_XR13, MXU_XR0, MXU_WW, MXU_AA); /* ..   : 2db  */
 	MXU_S32SFL(MXU_XR2, MXU_XR8, MXU_XR10, MXU_XR1, 3);  /* [g+dg:g], [r+dr:r] */
 	MXU_S32SFL(MXU_XR0, MXU_XR9, MXU_XR11, MXU_XR3, 3);  /*           [b+db:b] */
+	MXU_Q16ADD(MXU_XR12, MXU_XR13, MXU_XR13, MXU_XR0, MXU_WW, MXU_AA); /* ..   : 2db  */
 	MXU_S32SFL(MXU_XR5, MXU_XR7, MXU_XR7, MXU_XR4, 3);   /* [2dg:2dg], [2dr:2dr] */
 	MXU_S32SFL(MXU_XR0, MXU_XR12, MXU_XR12, MXU_XR6, 3); /*           [2db:2db] */
 }
+
+/* Same, but for a span whose first pixel was already drawn by a scalar
+ * head step: accumulators start one increment in, [c+2dc : c+dc]. */
+static inline void mxu_gouraud_setup_after_head(const gpu_unai_inner_t &inn)
+{
+	const char *base = (const char *)&inn.gCol;
+	MXU_S32LDDO(MXU_XR10, base, 0);      /* g  : r  */
+	MXU_S32LDDO(MXU_XR11, base, 4);      /* .. : b  */
+	MXU_S32LDDO(MXU_XR12, base, 8);      /* dg : dr */
+	MXU_S32LDDO(MXU_XR13, base, 12);     /* .. : db */
+	MXU_Q16ADD(MXU_XR8, MXU_XR10, MXU_XR12, MXU_XR0, MXU_WW, MXU_AA);  /* c+dc  */
+	MXU_Q16ADD(MXU_XR9, MXU_XR11, MXU_XR13, MXU_XR0, MXU_WW, MXU_AA);
+	MXU_Q16ADD(MXU_XR7, MXU_XR12, MXU_XR12, MXU_XR0, MXU_WW, MXU_AA);  /* 2dc   */
+	MXU_Q16ADD(MXU_XR10, MXU_XR8, MXU_XR12, MXU_XR0, MXU_WW, MXU_AA);  /* c+2dc */
+	MXU_Q16ADD(MXU_XR11, MXU_XR9, MXU_XR13, MXU_XR0, MXU_WW, MXU_AA);
+	MXU_S32SFL(MXU_XR2, MXU_XR10, MXU_XR8, MXU_XR1, 3);  /* [g+2dg:g+dg], [r+2dr:r+dr] */
+	MXU_S32SFL(MXU_XR0, MXU_XR11, MXU_XR9, MXU_XR3, 3);  /*               [b+2db:b+db] */
+	MXU_Q16ADD(MXU_XR12, MXU_XR13, MXU_XR13, MXU_XR0, MXU_WW, MXU_AA);
+	MXU_S32SFL(MXU_XR5, MXU_XR7, MXU_XR7, MXU_XR4, 3);
+	MXU_S32SFL(MXU_XR0, MXU_XR12, MXU_XR12, MXU_XR6, 3);
+}
+#define MXU_GOURAUD_SETUP_IN_XR 1
 #else
 static inline void mxu_gouraud_setup(const gpu_unai_inner_t &inn)
 {
@@ -254,7 +276,8 @@ static void poly_mxu_utx_gouraud(const gpu_unai_t &gpu_unai, le16_t *pDst, u32 c
 	u32 r = inn.gCol.c.r, g = inn.gCol.c.g, b = inn.gCol.c.b;
 
 	MXU_S32I2M(MXU_XR16, 1);
-	if ((uintptr_t)pDst & 2) {
+	const bool head = (uintptr_t)pDst & 2;
+	if (head) {
 		*pDst++ = u16_to_le16(((r >> 11) | ((g >> 6) & 0x3e0) | ((b >> 1) & 0x7c00))
 		                      | (MSET ? 0x8000 : 0));
 		r = (u16)(r + inn.gInc.c.r);
@@ -262,6 +285,14 @@ static void poly_mxu_utx_gouraud(const gpu_unai_t &gpu_unai, le16_t *pDst, u32 c
 		b = (u16)(b + inn.gInc.c.b);
 		if (!--count) return;
 	}
+#ifdef MXU_GOURAUD_SETUP_IN_XR
+	/* per-span setup in XR (~15 insns instead of ~30 GPR pack ops); the
+	 * locals r/g/b are then only needed by the scalar head above */
+	if (head)
+		mxu_gouraud_setup_after_head(inn);
+	else
+		mxu_gouraud_setup(inn);
+#else
 	u32 dr = inn.gInc.c.r, dg = inn.gInc.c.g, db = inn.gInc.c.b;
 	MXU_S32I2M(MXU_XR1, (((r + dr) & 0xffff) << 16) | r);
 	MXU_S32I2M(MXU_XR2, (((g + dg) & 0xffff) << 16) | g);
@@ -269,6 +300,7 @@ static void poly_mxu_utx_gouraud(const gpu_unai_t &gpu_unai, le16_t *pDst, u32 c
 	MXU_S32I2M(MXU_XR4, (((2 * dr) & 0xffff) << 16) | ((2 * dr) & 0xffff));
 	MXU_S32I2M(MXU_XR5, (((2 * dg) & 0xffff) << 16) | ((2 * dg) & 0xffff));
 	MXU_S32I2M(MXU_XR6, (((2 * db) & 0xffff) << 16) | ((2 * db) & 0xffff));
+#endif
 	MXU_S32I2M(MXU_XR14, 0x03e003e0);
 	MXU_S32I2M(MXU_XR15, 0x7c007c00);
 	if (MSET)
@@ -330,13 +362,21 @@ static void poly_mxu_utx_blend(const gpu_unai_t &gpu_unai, le16_t *pDst, u32 cou
 		} \
 	} while (0)
 
-	if ((uintptr_t)pDst & 2) {
+	const bool head = (uintptr_t)pDst & 2;
+	if (head) {
 		UTXB_ONE();
 		if (!--count) return;
 	}
 
 	u32 src_pair = pix | (pix << 16);
 	if (GOU) {
+#ifdef MXU_GOURAUD_SETUP_IN_XR
+		/* the head pixel (if any) stepped the accumulators one in */
+		if (head)
+			mxu_gouraud_setup_after_head(inn);
+		else
+			mxu_gouraud_setup(inn);
+#else
 		/* NOT mxu_gouraud_setup(inn): the head pixel may have stepped the
 		 * local accumulators past inn.gCol — load from the locals. */
 		u32 dr = inn.gInc.c.r, dg = inn.gInc.c.g, db = inn.gInc.c.b;
@@ -346,6 +386,7 @@ static void poly_mxu_utx_blend(const gpu_unai_t &gpu_unai, le16_t *pDst, u32 cou
 		MXU_S32I2M(MXU_XR4, (((2 * dr) & 0xffff) << 16) | ((2 * dr) & 0xffff));
 		MXU_S32I2M(MXU_XR5, (((2 * dg) & 0xffff) << 16) | ((2 * dg) & 0xffff));
 		MXU_S32I2M(MXU_XR6, (((2 * db) & 0xffff) << 16) | ((2 * db) & 0xffff));
+#endif
 		MXU_S32I2M(MXU_XR14, 0x03e003e0);
 		MXU_S32I2M(MXU_XR15, 0x7c007c00);
 	}

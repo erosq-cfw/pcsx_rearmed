@@ -231,6 +231,10 @@ int main(void)
 	run_poly<0x121>("0x121", N); run_poly<0x1a1>("0x1a1", N); run_poly<0x1c1>("0x1c1", N);
 	run_poly<0x0a3>("0x0a3", N); run_poly<0x0ab>("0x0ab", N); run_poly<0x0b3>("0x0b3", N); run_poly<0x0bb>("0x0bb", N);
 	run_poly<0x023>("0x023", N); run_poly<0x033>("0x033", N); run_poly<0x1b3>("0x1b3", N);
+	/* untextured gouraud (+MASKSET) and untextured gouraud blends 0-3 */
+	run_poly<0x081>("0x081", N); run_poly<0x181>("0x181", N);
+	run_poly<0x083>("0x083", N); run_poly<0x08b>("0x08b", N); run_poly<0x093>("0x093", N);
+	run_poly<0x09b>("0x09b", N); run_poly<0x183>("0x183", N);
 	printf("mxu raw-op poly test: %d cases, %d FAIL, mxu output hash %08x\n", cases, fails, out_hash);
 	return fails ? 1 : 0;
 }
