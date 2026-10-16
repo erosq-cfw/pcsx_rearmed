@@ -351,6 +351,41 @@ void bgr888_to_xrgb8888_640_to_320(void * __restrict__ dst_,
 		*dst = (src[0] << 16) | (src[1] << 8) | src[2];
 }
 
+/* EROSQ: 321..507-wide 16bpp modes (Ape Escape's 368, ...) straight to
+ * 320 columns: d[x] = s[x * src_w / 320], the same nearest pick
+ * present_scaled() used to make from the converted shadow copy, so the
+ * panel image is identical -- but this way the frame goes VRAM -> scanout
+ * in one pass (direct path) instead of convert-to-shadow + scale-present. */
+static int16_t scaled_xmap[320];
+void bgr555_to_rgb565_scaled_setup(int src_w)
+{
+	int x;
+	for (x = 0; x < 320; x++)
+		scaled_xmap[x] = x * src_w / 320;
+}
+
+void bgr555_to_rgb565_scaled_to_320(void * __restrict__ dst_,
+	const void * __restrict__ src_, int dpixels)
+{
+	const uint16_t * __restrict__ src = src_;
+	const int16_t *xm = scaled_xmap;
+	int x = 0;
+
+	if (dpixels > 320)
+		dpixels = 320;
+	if (!((uintptr_t)dst_ & 3)) {
+		uint32_t * __restrict__ dst = dst_;
+		for (; x + 1 < dpixels; x += 2) {
+			uint32_t p = LE16TOH(src[xm[x]]) | ((uint32_t)LE16TOH(src[xm[x + 1]]) << 16);
+			*dst++ = bgr555_to_rgb565_pair(p);
+		}
+	}
+	for (; x < dpixels; x++) {
+		uint16_t *d = (uint16_t *)dst_ + x;
+		*d = (uint16_t)bgr555_to_rgb565_pair(LE16TOH(src[xm[x]]));
+	}
+}
+
 void bgr555_to_rgb565_512_to_320(void * __restrict__ dst_,
 	const void * __restrict__ src_, int dpixels)
 {

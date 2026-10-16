@@ -345,6 +345,17 @@ static void pl_vout_set_mode(int w, int h, int raw_w, int raw_h, int bpp)
 			vout_h /= 2;
 	}
 
+#ifdef EROSQ
+	/* 321..507-wide 16bpp (Ape's 368): scale while converting, so the frame
+	 * takes the 320 direct-to-scanout path (plat_erosq) instead of a
+	 * convert-to-shadow + present_scaled pass. Same column picks. */
+	if (bpp == 16 && vout_w > 320 && vout_w < 508 - 4 &&
+	    pl_rearmed_cbs.cspace_blit == cspace_f->blit) {
+		bgr555_to_rgb565_scaled_setup(vout_w);
+		pl_rearmed_cbs.cspace_blit = bgr555_to_rgb565_scaled_to_320;
+		vout_w = 320;
+	}
+#endif
 	assert(vout_h >= 192);
 
 	pl_vout_scale_w = pl_vout_scale_h = 1;

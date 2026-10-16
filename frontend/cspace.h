@@ -23,6 +23,8 @@ void bgr888_to_rgb888_640_to_320(void *dst, const void *src, int dst_pixels);
 void bgr555_to_xrgb8888_640_to_320(void *dst, const void *src, int dst_pixels);
 void bgr888_to_xrgb8888_640_to_320(void *dst, const void *src, int dst_pixels);
 void bgr555_to_rgb565_512_to_320(void *dst, const void *src, int dst_pixels);
+void bgr555_to_rgb565_scaled_setup(int src_w);
+void bgr555_to_rgb565_scaled_to_320(void *dst, const void *src, int dst_pixels);
 void bgr888_to_rgb565_512_to_320(void *dst, const void *src, int dst_pixels);
 void bgr888_to_rgb888_512_to_320(void *dst, const void *src, int dst_pixels);
 void bgr555_to_xrgb8888_512_to_320(void *dst, const void *src, int dst_pixels);
