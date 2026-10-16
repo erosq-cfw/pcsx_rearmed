@@ -79,6 +79,17 @@ static inline uint32_t bgr888_to_rgb565_pair(const uint8_t * __restrict__ src,
  * parity takes the scalar path for the whole row (rare for these buffers). */
 #include "../plugins/gpu_unai/mxu_x1000.h"
 
+/* byte-offset load/store helpers: immediate-offset forms when available
+ * (no per-access $t9 setup), else offset-0 forms on a computed address
+ * (host harnesses that only model the original ops). */
+#ifdef MXU_S32LDDO
+#define CS_LDD(x, p, off) MXU_S32LDDO(x, p, off)
+#define CS_STD(x, p, off) MXU_S32STDO(x, p, off)
+#else
+#define CS_LDD(x, p, off) MXU_S32LDD(x, (const char *)(p) + (off))
+#define CS_STD(x, p, off) MXU_S32STD(x, (char *)(p) + (off))
+#endif
+
 #define BGR555_ONE(dp, sp) do { \
 	unsigned s_ = (sp); \
 	unsigned d_ = (s_ << 1) & 0xffff; \
@@ -106,6 +117,29 @@ void bgr555_to_rgb565(void * __restrict__ dst_, const void * __restrict__ src_,
 		dst++; src++; pixels--;
 	}
 
+#ifdef MXU_S32LDDO
+	/* 16 px (one 32-byte source line) per iteration: one prefetch per
+	 * line, immediate-offset loads/stores (no per-access $t9 setup). */
+	for (; pixels >= 16; pixels -= 16, src += 16, dst += 16) {
+		__builtin_prefetch(src + 48);
+#define BGR555_4(o) \
+		MXU_S32LDDO(MXU_XR1, src, (o));                          \
+		MXU_S32LDDO(MXU_XR2, src, (o) + 4);                      \
+		MXU_Q16SLL(MXU_XR3, MXU_XR1, MXU_XR2, MXU_XR4, 1);       \
+		MXU_Q16SLL(MXU_XR5, MXU_XR1, MXU_XR2, MXU_XR6, 11);      \
+		MXU_Q16SLR(MXU_XR7, MXU_XR3, MXU_XR4, MXU_XR8, 11);      \
+		MXU_S32AND(MXU_XR9,  MXU_XR3, MXU_XR15);                 \
+		MXU_S32AND(MXU_XR10, MXU_XR4, MXU_XR15);                 \
+		MXU_S32OR(MXU_XR5, MXU_XR5, MXU_XR9);                    \
+		MXU_S32OR(MXU_XR5, MXU_XR5, MXU_XR7);                    \
+		MXU_S32OR(MXU_XR6, MXU_XR6, MXU_XR10);                   \
+		MXU_S32OR(MXU_XR6, MXU_XR6, MXU_XR8);                    \
+		MXU_S32STDO(MXU_XR5, dst, (o));                          \
+		MXU_S32STDO(MXU_XR6, dst, (o) + 4);
+		BGR555_4(0) BGR555_4(8) BGR555_4(16) BGR555_4(24)
+#undef BGR555_4
+	}
+#endif
 	for (; pixels >= 4; pixels -= 4, src += 4, dst += 4) {
 		MXU_S32LDD(MXU_XR1, src);      /* pixels 0,1 */
 		MXU_S32LDD(MXU_XR2, src + 2);  /* pixels 2,3 */
@@ -371,14 +405,14 @@ void bgr555_to_rgb565_512_to_320(void * __restrict__ dst_,
 
 		for (; dpixels >= 10; dpixels -= 10, src += 16, dst += 5) {
 			__builtin_prefetch(src + 48);
-			MXU_S32LDD(MXU_XR1, src);        /* px1 :px0  */
-			MXU_S32LDD(MXU_XR2, src + 2);    /* px3 :px2  */
-			MXU_S32LDD(MXU_XR3, src + 4);    /* px5 :px4  */
-			MXU_S32LDD(MXU_XR4, src + 6);    /* px7 :px6  */
-			MXU_S32LDD(MXU_XR5, src + 8);    /* px9 :px8  */
-			MXU_S32LDD(MXU_XR6, src + 10);   /* px11:px10 */
-			MXU_S32LDD(MXU_XR7, src + 12);   /* px13:px12 */
-			MXU_S32LDD(MXU_XR8, src + 14);   /* px15:px14 */
+			CS_LDD(MXU_XR1, src, 0);        /* px1 :px0  */
+			CS_LDD(MXU_XR2, src, 4);    /* px3 :px2  */
+			CS_LDD(MXU_XR3, src, 8);    /* px5 :px4  */
+			CS_LDD(MXU_XR4, src, 12);    /* px7 :px6  */
+			CS_LDD(MXU_XR5, src, 16);    /* px9 :px8  */
+			CS_LDD(MXU_XR6, src, 20);   /* px11:px10 */
+			CS_LDD(MXU_XR7, src, 24);   /* px13:px12 */
+			CS_LDD(MXU_XR8, src, 28);   /* px15:px14 */
 			/* decimate: build the 5 output words */
 			MXU_S32SFL(MXU_XR0, MXU_XR2, MXU_XR1, MXU_XR9, 3);   /* px2 :px0  */
 			MXU_S32ALNI(MXU_XR10, MXU_XR5, MXU_XR4, 2);          /* px8 :px7  */
@@ -394,8 +428,8 @@ void bgr555_to_rgb565_512_to_320(void * __restrict__ dst_,
 			MXU_S32OR(MXU_XR4, MXU_XR4, MXU_XR6);
 			MXU_S32OR(MXU_XR5, MXU_XR5, MXU_XR2);
 			MXU_S32OR(MXU_XR5, MXU_XR5, MXU_XR7);
-			MXU_S32STD(MXU_XR4, dst);
-			MXU_S32STD(MXU_XR5, dst + 1);
+			CS_STD(MXU_XR4, dst, 0);
+			CS_STD(MXU_XR5, dst, 4);
 			/* convert pair (XR10, XR11) -> dst[2..3] */
 			MXU_Q16SLL(MXU_XR1, MXU_XR10, MXU_XR11, MXU_XR2, 1);
 			MXU_Q16SLL(MXU_XR4, MXU_XR10, MXU_XR11, MXU_XR5, 11);
@@ -406,8 +440,8 @@ void bgr555_to_rgb565_512_to_320(void * __restrict__ dst_,
 			MXU_S32OR(MXU_XR4, MXU_XR4, MXU_XR6);
 			MXU_S32OR(MXU_XR5, MXU_XR5, MXU_XR2);
 			MXU_S32OR(MXU_XR5, MXU_XR5, MXU_XR7);
-			MXU_S32STD(MXU_XR4, dst + 2);
-			MXU_S32STD(MXU_XR5, dst + 3);
+			CS_STD(MXU_XR4, dst, 8);
+			CS_STD(MXU_XR5, dst, 12);
 			/* convert single (XR12) -> dst[4] */
 			MXU_Q16SLL(MXU_XR1, MXU_XR12, MXU_XR0, MXU_XR0, 1);
 			MXU_Q16SLL(MXU_XR4, MXU_XR12, MXU_XR0, MXU_XR0, 11);
@@ -415,7 +449,7 @@ void bgr555_to_rgb565_512_to_320(void * __restrict__ dst_,
 			MXU_S32AND(MXU_XR1, MXU_XR1, MXU_XR15);
 			MXU_S32OR(MXU_XR4, MXU_XR4, MXU_XR1);
 			MXU_S32OR(MXU_XR4, MXU_XR4, MXU_XR6);
-			MXU_S32STD(MXU_XR4, dst + 4);
+			CS_STD(MXU_XR4, dst, 16);
 		}
 	}
 #endif
@@ -563,9 +597,9 @@ void bgr555_to_rgb565_512_to_320_avg(void * __restrict__ dst_,
 		for (; dpixels >= 10; dpixels -= 10, src += 16, dst += 5) {
 			__builtin_prefetch(src + 48);
 			/* ---- words 0,1: X0..X2 ---- */
-			MXU_S32LDD(MXU_XR1, src);        /* s1 :s0  = A0 */
-			MXU_S32LDD(MXU_XR2, src + 2);    /* s3 :s2       */
-			MXU_S32LDD(MXU_XR3, src + 4);    /* s5 :s4  = B1 */
+			CS_LDD(MXU_XR1, src, 0);        /* s1 :s0  = A0 */
+			CS_LDD(MXU_XR2, src, 4);    /* s3 :s2       */
+			CS_LDD(MXU_XR3, src, 8);    /* s5 :s4  = B1 */
 			MXU_S32ALNI(MXU_XR4, MXU_XR2, MXU_XR1, 2);  /* s2:s1 = B0 */
 			MXU_S32ALNI(MXU_XR5, MXU_XR3, MXU_XR2, 2);  /* s4:s3 = A1 */
 			MXU_S32XOR(MXU_XR6, MXU_XR1, MXU_XR4);
@@ -587,14 +621,14 @@ void bgr555_to_rgb565_512_to_320_avg(void * __restrict__ dst_,
 			MXU_S32OR(MXU_XR6, MXU_XR6, MXU_XR8);
 			MXU_S32OR(MXU_XR7, MXU_XR7, MXU_XR5);
 			MXU_S32OR(MXU_XR7, MXU_XR7, MXU_XR9);
-			MXU_S32STD(MXU_XR6, dst);
-			MXU_S32STD(MXU_XR7, dst + 1);
+			CS_STD(MXU_XR6, dst, 0);
+			CS_STD(MXU_XR7, dst, 4);
 			/* ---- words 2,3,4: X3..X7 ---- */
-			MXU_S32LDD(MXU_XR1, src + 6);    /* s7 :s6  */
-			MXU_S32LDD(MXU_XR2, src + 8);    /* s9 :s8  */
-			MXU_S32LDD(MXU_XR3, src + 10);   /* s11:s10 */
-			MXU_S32LDD(MXU_XR4, src + 12);   /* s13:s12 */
-			MXU_S32LDD(MXU_XR5, src + 14);   /* s15:s14 */
+			CS_LDD(MXU_XR1, src, 12);    /* s7 :s6  */
+			CS_LDD(MXU_XR2, src, 16);    /* s9 :s8  */
+			CS_LDD(MXU_XR3, src, 20);   /* s11:s10 */
+			CS_LDD(MXU_XR4, src, 24);   /* s13:s12 */
+			CS_LDD(MXU_XR5, src, 28);   /* s15:s14 */
 			MXU_S32SFL(MXU_XR6, MXU_XR2, MXU_XR1, MXU_XR7, 3);   /* B2=s9:s7  A2=s8:s6 */
 			MXU_S32SFL(MXU_XR8, MXU_XR3, MXU_XR2, MXU_XR0, 3);   /* A3=s11:s9 */
 			MXU_S32SFL(MXU_XR0, MXU_XR4, MXU_XR3, MXU_XR9, 3);   /* B3=s12:s10 */
@@ -623,8 +657,8 @@ void bgr555_to_rgb565_512_to_320_avg(void * __restrict__ dst_,
 			MXU_S32OR(MXU_XR3, MXU_XR3, MXU_XR5);
 			MXU_S32OR(MXU_XR4, MXU_XR4, MXU_XR2);
 			MXU_S32OR(MXU_XR4, MXU_XR4, MXU_XR6);
-			MXU_S32STD(MXU_XR3, dst + 2);
-			MXU_S32STD(MXU_XR4, dst + 3);
+			CS_STD(MXU_XR3, dst, 8);
+			CS_STD(MXU_XR4, dst, 12);
 			/* convert single (XR11) -> dst[4] */
 			MXU_Q16SLL(MXU_XR1, MXU_XR11, MXU_XR0, MXU_XR0, 1);
 			MXU_Q16SLL(MXU_XR3, MXU_XR11, MXU_XR0, MXU_XR0, 11);
@@ -632,7 +666,7 @@ void bgr555_to_rgb565_512_to_320_avg(void * __restrict__ dst_,
 			MXU_S32AND(MXU_XR1, MXU_XR1, MXU_XR15);
 			MXU_S32OR(MXU_XR3, MXU_XR3, MXU_XR1);
 			MXU_S32OR(MXU_XR3, MXU_XR3, MXU_XR5);
-			MXU_S32STD(MXU_XR3, dst + 4);
+			CS_STD(MXU_XR3, dst, 16);
 		}
 	}
 #endif

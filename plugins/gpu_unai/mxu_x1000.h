@@ -89,6 +89,34 @@
 		: "memory");                                             \
 } while (0)
 
+/* S32LDD/S32STD with an immediate byte offset (multiple of 4, range
+ * -2048..2044; encoded as a signed 10-bit WORD offset in bits [19:10]).
+ * Saves the per-access "addiu $t9,base,off" that the offset-0 forms above
+ * cost when a kernel touches several words per iteration. Loads pin the
+ * base to $t9, stores to $t7, so a loop's src and dst pointers can each
+ * stay in their pinned register (gcc coalesces them) with no moves.
+ * Encoding checked under qemu -cpu XBurstR2 (test program ldoff.c, all
+ * offsets incl. +-2KB edges); on silicon run frontend/test_mxu_ldst_off.c. */
+#define MXU_S32LDDO(xra, base, off) do {                                 \
+	register unsigned long _mxu_b __asm__("t9") =                    \
+		(unsigned long)(base);                                   \
+	__asm__ __volatile__(".word %1" :: "r"(_mxu_b),                  \
+		"i"(0x70000000u | (25u << 21) |                          \
+		    ((((unsigned)(off) >> 2) & 0x3ffu) << 10) |          \
+		    ((xra) << 6) | 0x10u)                                \
+		: "memory");                                             \
+} while (0)
+
+#define MXU_S32STDO(xra, base, off) do {                                 \
+	register unsigned long _mxu_b __asm__("t7") =                    \
+		(unsigned long)(base);                                   \
+	__asm__ __volatile__(".word %1" :: "r"(_mxu_b),                  \
+		"i"(0x70000000u | (15u << 21) |                          \
+		    ((((unsigned)(off) >> 2) & 0x3ffu) << 10) |          \
+		    ((xra) << 6) | 0x11u)                                \
+		: "memory");                                             \
+} while (0)
+
 /* ---- XR-only ALU ops ---- */
 
 /* D16MUL XRa, XRb, XRc, XRd, optn2 (WW: XRa = b.H*c.H, XRd = b.L*c.L,

@@ -56,6 +56,11 @@ static int mutate_sfl = 0;   /* harness self-check: break one shuffle */
 #define MXU_S32M2I(r)      (host_xr[(r)])
 #define MXU_S32LDD(r, base) do { uint32_t _v; memcpy(&_v, (const void *)(base), 4); HX_SET(r, _v); } while (0)
 #define MXU_S32STD(r, base) do { uint32_t _v = host_xr[(r)]; memcpy((void *)(base), &_v, 4); } while (0)
+/* immediate-offset forms (byte offset); model enforces word alignment */
+#define MXU_S32LDDO(r, base, off) do { if (((uintptr_t)(base) + (off)) & 3) { fprintf(stderr, "LDDO misaligned\n"); exit(1); } \
+	uint32_t _v; memcpy(&_v, (const char *)(base) + (off), 4); HX_SET(r, _v); } while (0)
+#define MXU_S32STDO(r, base, off) do { if (((uintptr_t)(base) + (off)) & 3) { fprintf(stderr, "STDO misaligned\n"); exit(1); } \
+	uint32_t _v = host_xr[(r)]; memcpy((char *)(base) + (off), &_v, 4); } while (0)
 #define MXU_Q16SLL(a, b, c, d, s) do { uint32_t _b = hx_sll16(host_xr[b], s), _c = hx_sll16(host_xr[c], s); HX_SET(a, _b); HX_SET(d, _c); } while (0)
 #define MXU_Q16SLR(a, b, c, d, s) do { uint32_t _b = hx_slr16(host_xr[b], s), _c = hx_slr16(host_xr[c], s); HX_SET(a, _b); HX_SET(d, _c); } while (0)
 #define MXU_Q16ADD(a, b, c, d, optn2, aptn2) do { \
@@ -125,8 +130,46 @@ static int run_case(int dpixels, int src_off, int verbose) {
 	return 0;
 }
 
+/* plain 1:1 convert and the Fast (pick) 512->320 kernel, same harness */
+static const int pick512[10] = { 0, 2, 4, 5, 7, 8, 10, 12, 13, 15 };
+static int run_plain(int pixels, int so, int doff) {
+	for (int i = 0; i < GUARD + CAP + GUARD; i++) {
+		srcbuf[i] = (uint16_t)rnd(); uint16_t f = (uint16_t)rnd(); bufA[i] = f; bufB[i] = f;
+	}
+	const uint16_t *src = srcbuf + GUARD + so;
+	bgr555_to_rgb565(bufA + GUARD + doff, src, pixels);
+	for (int i = 0; i < pixels; i++) {
+		unsigned v = src[i], d = (v << 1) & 0xffff;   /* upstream do_one */
+		bufB[GUARD + doff + i] = (uint16_t)((d & 0x07c0) | ((v << 11) & 0xffff) | (d >> 11));
+	}
+	return memcmp(bufA, bufB, sizeof bufA) != 0;
+}
+static int run_fast(int dpixels, int so) {
+	for (int i = 0; i < GUARD + CAP + GUARD; i++) {
+		srcbuf[i] = (uint16_t)rnd(); uint16_t f = (uint16_t)rnd(); bufA[i] = f; bufB[i] = f;
+	}
+	const uint16_t *src = srcbuf + GUARD + so;
+	bgr555_to_rgb565_512_to_320(bufA + GUARD, src, dpixels);
+	for (int g = 0; g + 10 <= dpixels; g += 10)
+		for (int j = 0; j < 10; j++) {
+			unsigned v = src[(g / 10) * 16 + pick512[j]] & 0x7fff;
+			bufB[GUARD + g + j] = ref_conv((uint16_t)v);
+		}
+	return memcmp(bufA, bufB, sizeof bufA) != 0;
+}
+
 int main(void) {
 	int fails = 0, cases = 0;
+	int pf = 0, ff = 0;
+	for (int px = 0; px <= 80; px++)
+		for (int so = 0; so <= 1; so++)
+			for (int doff = 0; doff <= 1; doff++) { pf += run_plain(px, so, doff); cases++; }
+	for (int t = 0; t < 100000; t++) { pf += run_plain((int)(rnd() % (CAP - 2)), rnd() & 1, rnd() & 1); cases++; }
+	for (int dp = 0; dp <= 340; dp++)
+		for (int so = 0; so <= 3; so++) { ff += run_fast(dp, so); cases++; }
+	for (int t = 0; t < 100000; t++) { ff += run_fast((int)(rnd() % 420), rnd() & 3); cases++; }
+	printf("plain 1:1 MXU: %d FAIL; Fast 512->320 MXU: %d FAIL\n", pf, ff);
+	fails += pf + ff;
 	for (int dp = 0; dp <= 340; dp++)
 		for (int so = 0; so <= 3; so++) { fails += run_case(dp, so, fails < 3); cases++; }
 	for (int t = 0; t < 200000; t++) {
