@@ -175,7 +175,14 @@
 #define REC_RAM_PTR_SIZE sizeof(uptr)
 #define REC_RAM_SIZE (0x200000 / 4 * REC_RAM_PTR_SIZE)
 #define REC_ROM_SIZE ( 0x80000 / 4 * REC_RAM_PTR_SIZE)
-#define REC_RAM_VADDR 0x20000000ULL
+/* 0x21000000: OUTSIDE the PROT_NONE guest window [RESV_LO, RESV_HI) =
+ * [0x0fe00000, 0x20010000) that mipsrec_init_mmap reserves -- at 0x20000000
+ * Part B's MAP_FIXED would map the writable block-ptr table over the top of
+ * that window, back within guest reach. 16 MB aligned because the mmap
+ * dispatch builds slot addresses with lui + ins of the low 24 PC bits. */
+#define REC_RAM_VADDR 0x21000000ULL
+static_assert(REC_RAM_VADDR >= 0x20010000ULL, "recRAM must lie above the guest reservation (RESV_HI)");
+static_assert((REC_RAM_VADDR & 0xffffffULL) == 0, "mmap dispatch needs a 16 MB aligned recRAM");
 #define REC_ROM_VADDR (REC_RAM_VADDR + (0x00c00000ULL / 4 * REC_RAM_PTR_SIZE))
 #ifdef MMAP_TO_ADDRESS_ZERO
 #define PSX_MEM_VADDR 0ULL

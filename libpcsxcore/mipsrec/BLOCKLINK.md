@@ -1,6 +1,6 @@
 # mipsrec block linking (EROSQ, 2026-10-17)
 
-Status: **phase 1 in progress** on branch `blocklink` (off `dt2fix` 720f492). The kill-switch is
+Status: **phase 1 implemented; offline differential PASS (research hlink 4000/4000, mutations caught); device checks in progress** on branch `blocklink` (off `dt2fix` 720f492). The kill-switch is
 `EROSQ_BLOCKLINK` (default 0 = off). It is not shipped.
 
 ## Why
@@ -63,7 +63,7 @@ slow:
 - **psxRegs.stop (menu/save/quit):** stop is only consulted after psxBranchTest() in the loop
   today. The linked path takes `slow` whenever the horizon fires, so stop latency is unchanged.
 - **faultmem:** the inline sequence touches only psxRegs (fp), the recRAM/recROM slot (always
-  mapped, outside the guest reservation: recRAM is malloc'd / at 0x21000000 for Part B) and 16($sp).
+  mapped, outside the guest reservation: recRAM is malloc'd while Part B is off; Part B's REC_RAM_VADDR is 0x21000000 (static_assert: above RESV_HI 0x20010000)) and 16($sp).
   None of these fault, so fm_sigsegv is never entered with a PC inside the sequence.
   fm_tbl block ranges include the exit code as part of the block (it's emitted before block end).
 - **Security:** the slot address is a constant derived from a compile-time PC through psxRecLUT
