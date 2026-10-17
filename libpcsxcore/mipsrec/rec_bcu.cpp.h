@@ -102,6 +102,54 @@ static void emitBlockReturnPC(const u32  new_pc,
 #endif // USE_PC_CACHING
 }
 
+
+/* EROSQ block linking, phase 1 ("slot-direct exits", BLOCKLINK.md).
+ * At an exit whose target PC is a compile-time constant, do the dispatch
+ * loop's work inline for that PC: charge cycles, run the loop's wrap-safe
+ * horizon check, read the target's recRAM/recROM slot and jr to it. If the
+ * horizon fires or the slot is 0 (never compiled / SMC-invalidated), fall
+ * back to the unchanged loop exit (cycles NOT yet stored, v1 = cycles).
+ * Nothing is ever patched: invalidation, reset and the I$ need no extra care.
+ * Caller has already set $v0 = target (emitBlockReturnPC) and flushed regs. */
+static int blocklink_mode;          /* EROSQ_BLOCKLINK: 0 off, 1 on, 2 on + count */
+extern "C" { u32 mipsrec_link_taken; }
+
+static void rec_end_part2_to(const bool use_fastpath_return, const u32 target)
+{
+	const u32 cycles = ADJUST_CLOCK((pc-oldpc)/4);
+	if (!blocklink_mode || use_fastpath_return || !block_ret_addr ||
+	    cycles > 0x7fff || (target & 3) || !psxRecLUT[target >> 16]) {
+		rec_recompile_end_part2(use_fastpath_return);
+		return;
+	}
+	const uptr slot = PC_REC(target);
+
+	LW(TEMP_3, PERM_REG_1, off(cycle));
+	LW(TEMP_1, PERM_REG_1, off(io_cycle_counter));
+	LUI(TEMP_2, ADR_HI(slot));
+	LW(TEMP_0, TEMP_2, ADR_LO(slot));          // target code ptr, 0 = invalid
+	ADDIU(TEMP_3, TEMP_3, cycles);
+	SUBU(TEMP_1, TEMP_3, TEMP_1);              // wrap-safe horizon, as the loop
+	u32 *const b_horizon = recMem;
+	BGEZ(TEMP_1, 0);
+	NOP();                                     // <BD>
+	u32 *const b_nocode = recMem;
+	BEQZ(TEMP_0, 0);
+	SW(MIPSREG_V0, PERM_REG_1, off(pc));       // <BD> loop stores pc too
+	SW(TEMP_3, PERM_REG_1, off(cycle));
+	if (blocklink_mode == 2) {
+		LUI(TEMP_2, ADR_HI(&mipsrec_link_taken));
+		LW(TEMP_1, TEMP_2, ADR_LO(&mipsrec_link_taken));
+		ADDIU(TEMP_1, TEMP_1, 1);
+		SW(TEMP_1, TEMP_2, ADR_LO(&mipsrec_link_taken));
+	}
+	JR(TEMP_0);
+	SW(TEMP_0, MIPSREG_SP, 16);                // <BD> fastpath slot (f_off_block_start_addr)
+	fixup_branch(b_horizon);
+	fixup_branch(b_nocode);
+	rec_recompile_end_part2(false);            // slow: unchanged loop exit
+}
+
 /* Emit code to set already-allocated register 'reg' to return address
  *  'return_pc' of a JAL/JALR/BAL instruction.
  *
@@ -307,7 +355,7 @@ static void iJumpNormal(u32 bpc)
 	if (!use_fastpath_return)
 		emitBlockReturnPC(bpc, BCU_FIRST_INSTRUCTION_ALWAYS_EXECUTED);
 
-	rec_recompile_end_part2(use_fastpath_return);
+	rec_end_part2_to(use_fastpath_return, bpc);
 
 	end_block = 1;
 }
@@ -341,7 +389,7 @@ static void iJumpAL(u32 bpc, u32 nbpc)
 	if (!use_fastpath_return)
 		emitBlockReturnPC(bpc, BCU_FIRST_INSTRUCTION_ALWAYS_EXECUTED);
 
-	rec_recompile_end_part2(use_fastpath_return);
+	if (dt == 2) rec_recompile_end_part2(use_fastpath_return); else rec_end_part2_to(use_fastpath_return, bpc);
 
 	end_block = 1;
 }
@@ -519,7 +567,7 @@ static void emitBxxZ(int andlink, u32 bpc, u32 nbpc)
 	if (bd_slot_loc == (uptr)recMem)
 		NOP();  // <BD slot>
 
-	rec_recompile_end_part2(use_fastpath_return);
+	if (dt == 2) rec_recompile_end_part2(use_fastpath_return); else rec_end_part2_to(use_fastpath_return, bpc);
 
 	regPopState();
 
@@ -650,7 +698,7 @@ static void emitBxx(u32 bpc)
 	if (bd_slot_loc == (uptr)recMem)
 		NOP();  // <BD slot>
 
-	rec_recompile_end_part2(use_fastpath_return);
+	rec_end_part2_to(use_fastpath_return, bpc);
 
 	fixup_branch(backpatch);
 	regUnlock(br1);

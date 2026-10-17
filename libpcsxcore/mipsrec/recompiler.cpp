@@ -1236,6 +1236,13 @@ static int recInit()
 
 	recMem = (u32*)recMemBase;
 
+	{	/* EROSQ block linking phase 1 (BLOCKLINK.md); default off */
+		const char *e = getenv("EROSQ_BLOCKLINK");
+		blocklink_mode = e ? atoi(e) : 0;
+		if (blocklink_mode)
+			printf("mipsrec: block linking (slot-direct exits) mode %d\n", blocklink_mode);
+	}
+
 	/* ponytail: the upstream pcsx4all code did
 	 *     memset(recMemBase, 0xff, RECMEM_SIZE_MAX + 0x1000);
 	 * here, to "allocate the RAM we need in advance" and to make an accidental
