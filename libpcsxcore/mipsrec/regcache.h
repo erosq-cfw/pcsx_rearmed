@@ -46,6 +46,8 @@ static RecRegisters regcache_bak[regcache_bak_size];
 /* Spill regs to psxRegs if they are in host regs and were modified */
 static void regClearJump(void)
 {
+	u8 *es_f0 = (u8 *)recMem;
+	es_flush_calls++;
 	for (int i = 1; i < 32; i++) {
 		if (regcache.psx[i].ismapped) {
 			int mappedto = regcache.psx[i].mappedto;
@@ -64,6 +66,7 @@ static void regClearJump(void)
 			regcache.host[mappedto].host_islocked = 0;
 		}
 	}
+	es_flush_bytes += (u8 *)recMem - es_f0;
 }
 
 static void regFreeRegs(void)
@@ -306,11 +309,14 @@ static void regUnlock(u32 reghost)
 
 static void regClearBranch(void)
 {
+	u8 *es_f0 = (u8 *)recMem;
+	es_brflush_calls++;
 	for (int i = 1; i < 32; i++) {
 		if (regcache.psx[i].ismapped && regcache.psx[i].psx_ischanged) {
 			SW(regcache.psx[i].mappedto, PERM_REG_1, offGPR(i));
 		}
 	}
+	es_brflush_bytes += (u8 *)recMem - es_f0;
 }
 
 static void regReset()

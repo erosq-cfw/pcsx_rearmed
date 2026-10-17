@@ -678,7 +678,16 @@ static void general_loads_stores(const int  count,
 
 #ifdef USE_DIRECT_MEM_ACCESS
 	const bool emit_direct   = !force_indirect && !LSU_use_only_indirect_access(op_rs);
-	const bool emit_indirect = !emit_direct || !LSU_use_only_direct_access(op_rs);
+	bool       emit_indirect = !emit_direct || !LSU_use_only_direct_access(op_rs);
+	/* EROSQ faultmem: the MMU replaces the range check + inline slow path
+	 * (see recompiler.cpp). Only the scratchpad skip of the SMC
+	 * invalidation remains, below. */
+	bool fm_series = false;
+	if (faultmem_block && emit_direct && emit_indirect) {
+		emit_indirect = false;
+		fm_series = true;
+		faultmem_block_used = true;
+	}
 #else
 	// NOTE: If you are debugging, #undefine identifier 'USE_DIRECT_MEM_ACCESS'
 	//       and recompile dynarec. Just forcing these false/true isn't enough.
@@ -686,11 +695,17 @@ static void general_loads_stores(const int  count,
 	const bool emit_indirect = true;
 #endif
 
+	if (es_on > 0) {
+		const int k = emit_direct ? (emit_indirect ? 1 : 0) : 2;
+		es_series[k]++;
+		es_series_ops[k] += count;
+	}
 	/*****************************************************************
 	 * Emit direct loads/stores & any appropriate code invalidations *
 	 *****************************************************************/
 	if (emit_direct)
 	{
+		ES_MARK(es_chk);
 		const bool contains_store = (pc_of_last_store_in_series != 1);
 		const bool emit_code_invalidation   = contains_store && !LSU_skip_code_invalidation(op_rs);
 		const bool emit_address_range_check = emit_indirect;
@@ -894,6 +909,8 @@ static void general_loads_stores(const int  count,
 		//  invalidation sequence will use the original base reg.
 		u32 unmodified_base_reg = rs;
 
+		ES_LSU_ADD(ES_LSU_CHECK, es_chk);
+		ES_MARK(es_dir);
 		u32 PC = pc - 4;
 		int icount = count;
 		do
@@ -1001,6 +1018,8 @@ static void general_loads_stores(const int  count,
 			}
 		} while (--icount);
 
+		ES_LSU_ADD(ES_LSU_DIRECT, es_dir);
+		ES_MARK(es_inv);
 		if (emit_code_invalidation)
 		{
 			/*****************************************************
@@ -1009,6 +1028,16 @@ static void general_loads_stores(const int  count,
 
 			bool first_invalidation_done = false;
 
+			if (fm_series) {
+				// No range check ran: skip the invalidation for scratchpad
+				//  (and any faulted HW) bases -- bit 27 of a guest RAM
+				//  address is 0, of 0x1f80_xxxx it is 1. Uses the base reg
+				//  (not base+imm): a 16-bit offset can't cross 0x0800_0000.
+				SLL(MIPSREG_A1, unmodified_base_reg, 4);
+				backpatch_label_exit_1 = (u32 *)recMem;
+				BLTZ(MIPSREG_A1, 0);
+				// <BD>: the LUI below
+			}
 			LUI(TEMP_3, ADR_HI(recRAM)); // temp_3 = upper code block ptr array addr
 
 			u32 PC = pc - 4;
@@ -1077,7 +1106,7 @@ static void general_loads_stores(const int  count,
 				}
 				ADDU(TEMP_1, TEMP_1, TEMP_3);
 
-				if ((PC-4) == pc_of_last_store_in_series && emit_direct) {
+				if ((PC-4) == pc_of_last_store_in_series && emit_direct && !fm_series) {
 					// This is the last store in the series, so the last invalidation
 					//  made and the end of all the direct code. Skip past the
 					//  indirect code coming after this.
@@ -1097,6 +1126,7 @@ static void general_loads_stores(const int  count,
 			} while (--icount);
 		}
 
+		ES_LSU_ADD(ES_LSU_INVAL, es_inv);
 		if (backpatch_label_hle_1)
 			fixup_branch(backpatch_label_hle_1);
 		if (backpatch_label_hle_2)
@@ -1111,6 +1141,7 @@ static void general_loads_stores(const int  count,
 	/******************************
 	 * Emit indirect loads/stores *
 	 ******************************/
+	ES_MARK(es_ind);
 	if (emit_indirect)
 	{
 		enum { WIDTH_8, WIDTH_16, WIDTH_32 };
@@ -1366,6 +1397,7 @@ static void general_loads_stores(const int  count,
 			}
 		} while (--icount);
 	}
+	ES_LSU_ADD(ES_LSU_INDIRECT, es_ind);
 
 	// label_exit:
 	if (backpatch_label_exit_1)

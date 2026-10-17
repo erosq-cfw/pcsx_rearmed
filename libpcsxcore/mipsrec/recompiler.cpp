@@ -49,6 +49,9 @@
 #include <unistd.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <signal.h>
+#include <errno.h>
+#include <ucontext.h>
 
 /* Standard console logging */
 #define REC_LOG(...) printf("mipsrec: " __VA_ARGS__)
@@ -395,6 +398,34 @@ static bool rec_mem_mapped;                /* Code ptr arrays mmap'd+mirrored at
  *   - expansion (psxP) and BIOS (psxR) are indirect-only; plain anonymous maps.
  * On any failure everything is unwound and -1 returned, so psxMemInit() can fall
  * back to the plain (METHOD-2) map and the emulator still runs, just slower. */
+/* EROSQ: anonymous shared memory object for a mapping that must exist
+ * twice. memfd_create() if the kernel has it; else shm_open() under a
+ * random name with O_EXCL and mode 0600, unlinked right away (no window in
+ * which another process can open it; retried on EEXIST). */
+#include <sys/syscall.h>
+static int mipsrec_anon_shm(size_t size)
+{
+	int fd = -1;
+#ifdef SYS_memfd_create
+	fd = (int)syscall(SYS_memfd_create, "mipsrec", 0u);
+#endif
+	if (fd < 0) {
+		for (int tries = 0; tries < 16 && fd < 0; tries++) {
+			unsigned r = 0;
+			int ur = open("/dev/urandom", O_RDONLY);
+			if (ur >= 0) { if (read(ur, &r, sizeof r) != sizeof r) r = 0; close(ur); }
+			r ^= (unsigned)getpid() * 2654435761u ^ (unsigned)tries;
+			char name[48];
+			snprintf(name, sizeof name, "/mipsrec.%08x.%u", r, (unsigned)tries);
+			fd = shm_open(name, O_RDWR | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR);
+			if (fd >= 0) shm_unlink(name);
+			else if (errno != EEXIST) break;
+		}
+	}
+	if (fd >= 0 && ftruncate(fd, size) < 0) { close(fd); fd = -1; }
+	return fd;
+}
+
 #define RESV_LO 0x0fe00000u
 #define RESV_HI 0x20010000u
 
@@ -464,11 +495,32 @@ extern "C" int mipsrec_init_mmap(void)
 		n_guard_mirrors = 2;
 	}
 
-	/* scratchpad + HW I/O region, fixed at 0x1f800000 (METHOD-1 expects it there). */
-	hw = mmap((void *)0x1f800000, 0x10000, PROT_READ | PROT_WRITE,
-	          MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
-	if (hw == MAP_FAILED || hw != (void *)0x1f800000) {
-		printf("mipsrec_init_mmap: psxH at 0x1f800000 failed\n"); goto fail;
+	/* scratchpad + HW I/O region, fixed at 0x1f800000 (METHOD-1 expects it there).
+	 * EROSQ faultmem: psxH is a shared object mapped twice -- the fixed
+	 * METHOD-1 view (JIT direct accesses) keeps only the scratchpad page
+	 * readable/writable and makes the HW I/O pages PROT_NONE, so a direct
+	 * access that lands on a HW register faults into the faultmem handler;
+	 * the C code (psxHw*, memRLUT, const-HW JIT accesses that bake psxH)
+	 * uses a full read/write alias of the same pages. Coherent by sharing.
+	 * The object is anonymous (memfd, or a random O_EXCL 0600 shm name that
+	 * is unlinked immediately: mipsrec_anon_shm). */
+	{
+		int hfd = mipsrec_anon_shm(0x10000);
+		if (hfd < 0) {
+			perror("mipsrec_init_mmap: psxH shm");
+			goto fail;
+		}
+		void *fixed = mmap((void *)0x1f800000, 0x10000, PROT_READ | PROT_WRITE,
+		                   MAP_SHARED | MAP_FIXED, hfd, 0);
+		hw = mmap(NULL, 0x10000, PROT_READ | PROT_WRITE, MAP_SHARED, hfd, 0);
+		close(hfd);
+		if (fixed != (void *)0x1f800000 || hw == MAP_FAILED) {
+			printf("mipsrec_init_mmap: psxH at 0x1f800000 failed\n");
+			if (fixed != MAP_FAILED) munmap(fixed, 0x10000);
+			goto fail;
+		}
+		if (!getenv("EROSQ_FAULTMEM") || getenv("EROSQ_FAULTMEM")[0] != '0')
+			mprotect((void *)0x1f801000, 0xf000, PROT_NONE);
 	}
 
 	/* Expansion region (psxP) — fixed at 0x1f000000, the address METHOD-1's
@@ -507,7 +559,7 @@ fail:
 	(void)n_guard_mirrors;
 	while (n_ram_maps-- > 0)
 		munmap((void *)(uintptr_t)(PSX_MEM_VADDR + 0x200000ULL * n_ram_maps), 0x200000);
-	if (hw   != MAP_FAILED) munmap(hw,   0x10000);
+	if (hw   != MAP_FAILED) { munmap(hw, 0x10000); munmap((void *)0x1f800000, 0x10000); }
 	if (exp  != MAP_FAILED) munmap(exp,  0x800000);
 	if (bios != MAP_FAILED) munmap(bios, 0x80000);
 	if (fd >= 0) close(fd);
@@ -529,6 +581,11 @@ static bool host_v0_reg_is_const;          /* PCs are cached in $v0. See rec_bcu
 static u32  host_v0_reg_constval;
 static bool host_ra_reg_has_block_retaddr; /* Indirect-return address is cached in $ra. */
 
+/* EROSQ faultmem (see the block above recRecompile()): may the block being
+ * compiled turn dual-path load/store series into direct-only ones? */
+static bool faultmem_block;
+static bool faultmem_block_used;
+
 
 #ifdef WITH_DISASM
 char	disasm_buffer[512];
@@ -539,6 +596,7 @@ char	disasm_buffer[512];
  * written. Called from regMipsChanged(). */
 static void lsu_note_guest_reg_write(u32 regpsx);
 
+#include "emitstat.h"
 #include "regcache.h"
 
 static void recReset();
@@ -821,6 +879,213 @@ static void rec_preload_regs(u32 start_pc)
 	}
 }
 
+/* ===================================================================
+ * EROSQ faultmem: let the MMU do the address range check.
+ *
+ * A load/store series whose base reg is not known to be RAM/scratchpad
+ * normally emits a range check (4-5 insns) + the direct accesses + an
+ * inline indirect copy (JAL psxMemRead/Write per access, ~4.7 insns) --
+ * the EROSQ_EMITSTAT offline corpus puts range checks at 16.9% and indirect
+ * slow paths at 17.6% of all emitted bytes, and the X1000 I$ is capacity-
+ * bound. With faultmem, such series are emitted DIRECT-ONLY. RAM (4 mirrors
+ * at 0x10000000) and the scratchpad page (0x1f800000) are mapped; every
+ * other METHOD-1 host address (HW I/O pages 0x1f801000-0x1f80ffff are now
+ * PROT_NONE, BIOS, KSEG2, unmapped space) faults. The SIGSEGV handler
+ * decodes the faulting host load/store, performs it through
+ * psxMemReadN/psxMemWriteN (exactly what the inline slow path called),
+ * writes the result into the saved register, and resumes at pc+4. It then
+ * marks the block's guest start PC "slow" and invalidates it, so the block
+ * is recompiled with the classic dual path: a spin-polled HW register costs
+ * one or two signals per site, not one per access.
+ *
+ * Constraints kept by the emitter: faultmem accesses are never placed in a
+ * host branch delay slot (no exit branch is emitted for direct-only series).
+ * Blocks are found from a host PC through fm_tbl (host end address + guest
+ * start, appended in emission order, binary-searched); when it is full,
+ * new blocks simply don't use faultmem until the next code-cache reset.
+ * EROSQ_FAULTMEM=0 turns the whole thing off (classic dual path).
+ * =================================================================== */
+#define FM_TBL_N  8192
+#define FM_SLOW_N 2048
+static int  fm_on = -1;
+static u32  fm_tbl_end[FM_TBL_N], fm_tbl_pc[FM_TBL_N];
+static int  fm_tbl_n;
+static u32  fm_slow[FM_SLOW_N];             /* guest block start PCs, 0 = empty */
+static u32  fm_exit_stub[8] __attribute__((aligned(32)));
+static volatile unsigned long fm_faults, fm_slow_n;
+static struct sigaction fm_old_sa;
+static bool fm_installed;
+
+static inline u32 fm_hash(u32 pc) { return (pc >> 2) * 2654435761u; }
+
+static bool fm_slow_has(u32 pc)
+{
+	for (u32 i = fm_hash(pc) % FM_SLOW_N, n = 0; n < FM_SLOW_N; n++, i = (i + 1) % FM_SLOW_N) {
+		if (fm_slow[i] == pc) return true;
+		if (fm_slow[i] == 0) return false;
+	}
+	return false;
+}
+
+static void fm_slow_add(u32 pc)
+{
+	if (fm_slow_n >= FM_SLOW_N * 3 / 4) return;   /* keep probes short */
+	for (u32 i = fm_hash(pc) % FM_SLOW_N, n = 0; n < FM_SLOW_N; n++, i = (i + 1) % FM_SLOW_N) {
+		if (fm_slow[i] == pc) return;
+		if (fm_slow[i] == 0) { fm_slow[i] = pc; fm_slow_n++; return; }
+	}
+}
+
+static int fm_enabled(void)
+{
+	if (fm_on < 0) {
+		const char *e = getenv("EROSQ_FAULTMEM");
+		fm_on = (e && e[0] == '0') ? 0 : 1;
+	}
+	return fm_on;
+}
+
+/* guest address for a faulting METHOD-1 host address (host = 0x10000000 |
+ * (guest & 0x0fffffff)): HW/BIOS/expansion are identical in KUSEG/KSEG0/1,
+ * so the KUSEG form works; 0x1ffexxxx can only be the KSEG2 cache-control
+ * window (0xfffe0130). */
+static inline u32 fm_guest_addr(u32 h)
+{
+	return ((h & 0xfffe0000u) == 0x1ffe0000u) ? (0xf0000000u | (h & 0x0fffffffu)) : h;
+}
+
+static void fm_chain(int sig, siginfo_t *si, void *uc)
+{
+	if (fm_old_sa.sa_flags & SA_SIGINFO) {
+		if (fm_old_sa.sa_sigaction) { fm_old_sa.sa_sigaction(sig, si, uc); return; }
+	} else if (fm_old_sa.sa_handler != SIG_DFL && fm_old_sa.sa_handler != SIG_IGN && fm_old_sa.sa_handler) {
+		fm_old_sa.sa_handler(sig); return;
+	}
+	signal(sig, SIG_DFL);
+	raise(sig);
+}
+
+static void fm_sigsegv(int sig, siginfo_t *si, void *ucv)
+{
+	ucontext_t *uc = (ucontext_t *)ucv;
+	const uptr pc = (uptr)uc->uc_mcontext.pc;
+	if (fm_on <= 0 || pc < (uptr)recMemBase || pc >= (uptr)recMemBase + RECMEM_SIZE || (pc & 3))
+		return fm_chain(sig, si, ucv);
+
+	const u32 insn = *(const u32 *)pc;
+	const u32 op = insn >> 26, base = (insn >> 21) & 31, rt = (insn >> 16) & 31;
+	if (op < 0x20 || op > 0x2e || op == 0x27 || op == 0x2c || op == 0x2d)
+		return fm_chain(sig, si, ucv);
+	const u32 h = (u32)uc->uc_mcontext.gregs[base] + (u32)(s32)(s16)insn;
+	if (h < RESV_LO || h >= RESV_HI)   /* anything a fast path can reach */
+		return fm_chain(sig, si, ucv);
+
+	const u32 g = fm_guest_addr(h);
+	const u32 r = (u32)uc->uc_mcontext.gregs[rt];
+	const u32 sh = (g & 3) * 8;
+	u32 v = 0;
+	bool load = true;
+	switch (op) {
+	case 0x20: v = (u32)(s32)(s8)psxMemRead8(g); break;           /* LB  */
+	case 0x24: v = psxMemRead8(g) & 0xff; break;                    /* LBU */
+	case 0x21: v = (u32)(s32)(s16)psxMemRead16(g); break;         /* LH  */
+	case 0x25: v = psxMemRead16(g) & 0xffff; break;                 /* LHU */
+	case 0x23: v = psxMemRead32(g); break;                          /* LW  */
+	case 0x22: {                                                    /* LWL */
+		const u32 w = psxMemRead32(g & ~3u);
+		v = (w << (24 - sh)) | (r & (0x00ffffffu >> sh));
+		break; }
+	case 0x26: {                                                    /* LWR */
+		const u32 w = psxMemRead32(g & ~3u);
+		v = (w >> sh) | (sh ? (r & (0xffffff00u << (24 - sh))) : 0);
+		break; }
+	/* SB/SH pass the FULL register, exactly like the inline slow path
+	 * (MOV a1, rt) and the interpreter: psxHwWrite16/8 'forced write32'
+	 * ports (0x1014, 0x1060, DMA MADR...) store all 32 bits. */
+	case 0x28: load = false; psxMemWrite8(g, r); break;             /* SB  */
+	case 0x29: load = false; psxMemWrite16(g, r); break;            /* SH  */
+	case 0x2b: load = false; psxMemWrite32(g, r); break;            /* SW  */
+	case 0x2a: {                                                    /* SWL */
+		load = false;
+		const u32 w = psxMemRead32(g & ~3u);
+		psxMemWrite32(g & ~3u, (sh == 24 ? 0 : (w & (0xffffff00u << sh))) | (r >> (24 - sh)));
+		break; }
+	case 0x2e: {                                                    /* SWR */
+		load = false;
+		const u32 w = psxMemRead32(g & ~3u);
+		psxMemWrite32(g & ~3u, (sh ? (w & (0x00ffffffu >> (24 - sh))) : 0) | (r << sh));
+		break; }
+	default:
+		return fm_chain(sig, si, ucv);
+	}
+	if (load && rt)
+		uc->uc_mcontext.gregs[rt] = (greg_t)(s32)v;
+	uc->uc_mcontext.pc = pc + 4;
+	fm_faults++;
+	{
+		static int dbg = -1;
+		if (dbg < 0) dbg = getenv("EROSQ_FAULTMEM_DEBUG") ? 1 : 0;
+		if (dbg) {
+			char b[96];
+			int n = snprintf(b, sizeof b, "faultmem: host %08x insn %08x guest %08x\n",
+					 (u32)pc, insn, g);
+			if (n > 0) { ssize_t w = write(2, b, n); (void)w; }
+		}
+	}
+
+	/* recompile the block with the classic dual path */
+	int lo = 0, hi = fm_tbl_n;
+	while (lo < hi) {                      /* first entry with end > pc */
+		const int mid = (lo + hi) / 2;
+		if (fm_tbl_end[mid] > (u32)pc) hi = mid; else lo = mid + 1;
+	}
+	if (lo < fm_tbl_n) {
+		const u32 gpc = fm_tbl_pc[lo];
+		fm_slow_add(gpc);
+		*(u32 *)PC_REC(gpc) = 0;
+		/* a block that returns to the dispatcher's self-loop fastpath
+		 * never looks itself up again: send that return through the stub,
+		 * which re-enters the main loop (lookup -> recompile). */
+		if (block_fast_ret_addr) {
+			u32 *slot = (u32 *)((uptr)uc->uc_mcontext.gregs[29] + 16);
+			*slot = (u32)(uptr)fm_exit_stub;
+		}
+	}
+}
+
+static void fm_install(void)
+{
+	if (fm_installed || !fm_enabled() || !psx_mem_mapped)
+		return;
+	/* stub: v0 = psxRegs.pc, v1 = 0 (cycles already added), j main loop */
+	u32 *save = recMem;
+	recMem = fm_exit_stub;
+	LUI(MIPSREG_T0, ADR_HI(&block_ret_addr));
+	LW(MIPSREG_T0, MIPSREG_T0, ADR_LO(&block_ret_addr));
+	LW(MIPSREG_V0, PERM_REG_1, off(pc));
+	JR(MIPSREG_T0);
+	MOV(MIPSREG_V1, 0);
+	recMem = save;
+	clear_insn_cache(fm_exit_stub, fm_exit_stub + 8, 0);
+
+	struct sigaction sa;
+	memset(&sa, 0, sizeof sa);
+	sa.sa_sigaction = fm_sigsegv;
+	sa.sa_flags = SA_SIGINFO;        /* NOT SA_ONSTACK: psxMemWrite may run DMA/GPU work */
+	sigemptyset(&sa.sa_mask);
+	if (sigaction(SIGSEGV, &sa, &fm_old_sa) == 0) {
+		fm_installed = true;
+		printf("mipsrec: faultmem on (EROSQ_FAULTMEM=0 disables)\n");
+	} else {
+		fm_on = 0;
+	}
+}
+
+extern "C" void mipsrec_faultmem_stats(unsigned long *faults, unsigned long *slow_blocks, int *tbl)
+{
+	*faults = fm_faults; *slow_blocks = fm_slow_n; *tbl = fm_tbl_n;
+}
+
 static void recRecompile()
 {
 	// Notify plugin_lib that we're recompiling (affects frameskip timing)
@@ -894,7 +1159,13 @@ static void recRecompile()
 	int discard_cnt = 0;
 
 	// EROSQ: issue the first basic block's guest-reg loads up front
+	faultmem_block = fm_installed && fm_on > 0 && fm_tbl_n < FM_TBL_N && !fm_slow_has(pc);
+	faultmem_block_used = false;
+
+	u8 *es_blk0 = (u8 *)recMem;
+	const u32 es_pc0 = pc;
 	rec_preload_regs(pc);
+	if (emitstat_enabled()) es_prologue += (u8 *)recMem - es_blk0;
 
 	do {
 		// Flag indicates if next instruction lies in a BD slot
@@ -927,9 +1198,32 @@ static void recRecompile()
 #endif
 
 		// Recompile next instruction.
-		recBSC[psxRegs.code>>26]();
+		if (__builtin_expect(es_on > 0, 0)) {
+			const u32 es_op = psxRegs.code, es_ipc = pc;
+			u8 *es_b = (u8 *)recMem;
+			recBSC[es_op>>26]();
+			const int c = es_classify(es_op);
+			es_bytes[c] += (u8 *)recMem - es_b;
+			es_calls[c]++;
+			es_guest[c] += (pc - es_ipc) / 4 + 1;  /* series/branches consume more */
+		} else
+			recBSC[psxRegs.code>>26]();
 		regUpdate();
 	} while (!end_block);
+
+	if (faultmem_block_used) {
+		fm_tbl_end[fm_tbl_n] = (u32)(uptr)recMem;
+		fm_tbl_pc[fm_tbl_n] = oldpc;
+		fm_tbl_n++;
+	}
+
+	if (es_on > 0) {
+		es_blocks++;
+		es_block_bytes += (u8 *)recMem - es_blk0;
+		es_block_guest += (pc - es_pc0) / 4;
+		if ((es_blocks & 4095) == 0)
+			mipsrec_emitstat_dump_(stderr);
+	}
 
 	DISASM_HOST();
 	clear_insn_cache(recMemStart, recMem, 0);
@@ -2049,6 +2343,8 @@ __asm__ __volatile__ (
 
 static void recExecute()
 {
+	fm_install();
+
 	// Clear code cache so that all emitted code from this point forward uses
 	//  the correct block-return method. This also clears out any now-dead code
 	//  emitted during BIOS startup. Non-dead BIOS code gets recompiled fresh.
@@ -2210,6 +2506,7 @@ static void recReset()
 	memset(recROM, 0, REC_ROM_SIZE);
 
 	recMem = (u32*)recMemBase;
+	fm_tbl_n = 0;      /* faultmem host->guest table: recMem was rewound */
 
 	regReset();
 
@@ -2237,8 +2534,29 @@ extern "C" {
 	int  mipsrec_rec_init(void)                     { return recInit(); }
 	void mipsrec_rec_reset(void)                    { recReset(); }
 	void mipsrec_rec_execute(void)                  { recExecute(); }
-	void mipsrec_rec_execute_block(unsigned pc)     { recExecuteBlock(pc); }
+	void mipsrec_rec_execute_block(unsigned pc)     { fm_install(); recExecuteBlock(pc); }
 	void mipsrec_rec_clear(u32 addr, u32 size)      { recClear(addr, size); }
 	void mipsrec_rec_notify(int note, void *data)   { recNotify(note, data); }
 	void mipsrec_rec_shutdown(void)                 { recShutdown(); }
 }
+
+/* EROSQ: compile one block at 'start' without executing it (offline
+ * emit-size harness, see erosq-emitstat/). Returns the guest PC after the
+ * block. Not used by the emulator. */
+extern "C" u32 mipsrec_rec_compile_at(u32 start)
+{
+	psxRegs.pc = start;
+	recRecompile();
+	return pc;
+}
+extern "C" void *mipsrec_rec_cur(void) { return recMem; }
+/* offline harness only: emit blocks as the live dispatcher would (direct
+ * returns to a fixed loop address) instead of the boot-time indirect mode */
+extern "C" void mipsrec_rec_harness_direct_returns(uintptr_t loop, uintptr_t fast)
+{
+	block_ret_addr = loop;
+	block_fast_ret_addr = fast;
+}
+extern "C" void mipsrec_rec_harness_faultmem(void) { fm_install(); }
+extern "C" void mipsrec_faultmem_clear_slow(void) { memset(fm_slow, 0, sizeof fm_slow); fm_slow_n = 0; }
+extern "C" void mipsrec_faultmem_set(int on) { fm_enabled(); fm_on = on; }
