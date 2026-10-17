@@ -111,8 +111,52 @@ static void emitBlockReturnPC(const u32  new_pc,
  * back to the unchanged loop exit (cycles NOT yet stored, v1 = cycles).
  * Nothing is ever patched: invalidation, reset and the I$ need no extra care.
  * Caller has already set $v0 = target (emitBlockReturnPC) and flushed regs. */
-static int blocklink_mode;          /* EROSQ_BLOCKLINK: 0 off, 1 on, 2 on + count */
+static int blocklink_mode;          /* EROSQ_BLOCKLINK: 0 off, 1 inline, 2 inline + count,
+                                       3 shared trampoline, 4 trampoline + count */
 extern "C" { u32 mipsrec_link_taken; }
+
+/* Modes 3/4: one shared trampoline does the check-and-jump. Entered with
+ * v0 = target PC, v1 = cycles (exactly the loop's contract), t2 = &slot.
+ * An exit then costs lui/addiu/j/li (+2 words over 'j loop; li v1'),
+ * instead of +13 inline: GT2's JIT footprint paid for the inline form in
+ * ITLB/JTLB misses. Static and emitted once, so code-cache resets don't
+ * touch it; block_ret_addr (the loop label) never changes once set. */
+static u32 bl_tramp[24] __attribute__((aligned(32)));
+static bool bl_tramp_ready;
+
+static void bl_tramp_emit(void)
+{
+	u32 *const save = recMem;
+	recMem = bl_tramp;
+	LW(TEMP_3, PERM_REG_1, off(cycle));
+	LW(TEMP_1, PERM_REG_1, off(io_cycle_counter));
+	LW(TEMP_0, TEMP_2, 0);                     // target code ptr, 0 = invalid
+	ADDU(TEMP_3, TEMP_3, MIPSREG_V1);
+	SUBU(TEMP_1, TEMP_3, TEMP_1);              // wrap-safe horizon, as the loop
+	u32 *const b_horizon = recMem;
+	BGEZ(TEMP_1, 0);
+	NOP();                                     // <BD>
+	u32 *const b_nocode = recMem;
+	BEQZ(TEMP_0, 0);
+	SW(MIPSREG_V0, PERM_REG_1, off(pc));       // <BD> loop stores pc too
+	SW(TEMP_3, PERM_REG_1, off(cycle));
+	if (blocklink_mode == 4) {
+		LUI(TEMP_2, ADR_HI(&mipsrec_link_taken));
+		LW(TEMP_1, TEMP_2, ADR_LO(&mipsrec_link_taken));
+		ADDIU(TEMP_1, TEMP_1, 1);
+		SW(TEMP_1, TEMP_2, ADR_LO(&mipsrec_link_taken));
+	}
+	JR(TEMP_0);
+	SW(TEMP_0, MIPSREG_SP, 16);                // <BD> fastpath slot
+	fixup_branch(b_horizon);
+	fixup_branch(b_nocode);
+	J(block_ret_addr);                         // slow: loop re-adds v1
+	NOP();
+	if (recMem > bl_tramp + 24) { printf("bl_tramp overflow\n"); exit(1); }
+	__builtin___clear_cache((char *)bl_tramp, (char *)(bl_tramp + 24));
+	recMem = save;
+	bl_tramp_ready = true;
+}
 
 static void rec_end_part2_to(const bool use_fastpath_return, const u32 target)
 {
@@ -123,6 +167,16 @@ static void rec_end_part2_to(const bool use_fastpath_return, const u32 target)
 		return;
 	}
 	const uptr slot = PC_REC(target);
+
+	if (blocklink_mode >= 3) {
+		if (!bl_tramp_ready)
+			bl_tramp_emit();
+		LUI(TEMP_2, ADR_HI(slot));
+		ADDIU(TEMP_2, TEMP_2, ADR_LO(slot));
+		J(bl_tramp);
+		LI16(MIPSREG_V1, cycles);              // <BD>
+		return;
+	}
 
 	LW(TEMP_3, PERM_REG_1, off(cycle));
 	LW(TEMP_1, PERM_REG_1, off(io_cycle_counter));

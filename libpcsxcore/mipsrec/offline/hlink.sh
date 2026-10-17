@@ -2,7 +2,7 @@
 # hlink.sh N [FIRST_SEED]   random programs, per-class pass counts
 # hlink.sh ctl              exact-count controls per linked site kind (below)
 # Block-linking differential test: generate N programs (gen_link.py), run each
-# through the real mipsrec in the SAME binary with EROSQ_BLOCKLINK=0 and =2
+# through the real mipsrec in the SAME binary with EROSQ_BLOCKLINK=0 and =2 (HL_MODE=4: trampoline)
 # (qemu-user), compare final GPRs / RAM hash / psxRegs.cycle / pc / horizon
 # count. A =2 run that took no linked exit FAILS (mipsrec_link_taken == 0);
 # while that counter isn't exported, set LINK_COUNTER_OPTIONAL=1.
@@ -49,7 +49,7 @@ one() {
   local env="HX_BUDGET=$budget HX_CYCLE0=$c0 HX_STOP_AFTER=$sa ${XENV:-}"
   local a b
   a=$(env $env EROSQ_BLOCKLINK=0 timeout ${HX_TIMEOUT:-120} $QEMU $S/hlink $S/$tag.bin 2>&1 | grep '^STATE' || echo "STATE crash-or-timeout")
-  b=$(env $env EROSQ_BLOCKLINK=2 timeout ${HX_TIMEOUT:-120} $QEMU $S/hlink $S/$tag.bin 2>&1 | grep '^STATE' || echo "STATE crash-or-timeout")
+  b=$(env $env EROSQ_BLOCKLINK=${HL_MODE:-2} timeout ${HX_TIMEOUT:-120} $QEMU $S/hlink $S/$tag.bin 2>&1 | grep '^STATE' || echo "STATE crash-or-timeout")
   local ka=$(echo "$a" | sed 's/ link_taken=[^ ]*//') kb=$(echo "$b" | sed 's/ link_taken=[^ ]*//')
   local lt=$(echo "$b" | grep -o 'link_taken=[^ ]*' | cut -d= -f2)
   if [ "$ka" != "$kb" ]; then echo "FAIL diff off:[$a] on:[$b]"; return; fi
