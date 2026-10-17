@@ -3,7 +3,7 @@
  * Runs one generated guest program (gen_link.py) through the REAL mipsrec
  * direct-return dispatcher (recExecute, what the device runs after boot)
  * and prints its final state. hlink.sh runs it twice in the same binary,
- * EROSQ_BLOCKLINK=0 and =1, and compares.
+ * EROSQ_BLOCKLINK=0 and =2, and compares.
  *
  * gen_interupt() is replaced (-Wl,--wrap=gen_interupt): every horizon hit
  * re-arms next_interupt = cycle + BUDGET (a small budget, so the inline
@@ -29,7 +29,8 @@ extern R3000Acpu psxRec;
 extern char __bss_start[], _end[];
 void psxRcntInit(void);
 /* exported by the blocklink build; weak until then */
-extern unsigned long mipsrec_link_taken __attribute__((weak));
+extern u32 mipsrec_link_taken __attribute__((weak));
+extern u32 cycle_multiplier;
 
 #define CODE  0x80010000u
 #define SENT  0x80020000u
@@ -73,6 +74,7 @@ int main(int argc, char **argv)
 
 	if (psxMemInit()) return 1;
 	if (mipsrec_rec_init()) return 1;
+	if (getenv("HX_MULT")) cycle_multiplier = strtoul(getenv("HX_MULT"), 0, 0);  /* ctl:long */
 	psxMemReset();
 	psxRcntInit();
 	psxCpu = &psxRec;
@@ -102,7 +104,7 @@ int main(int argc, char **argv)
 	g = fnv(&psxRegs.GPR.r[32], 2 * 4, g);                       /* lo hi */
 	u32 r = fnv(ram + (CODE & 0x1fffff), 0x22000, 2166136261u);  /* code, SENT, DONE, DATA */
 	char lt[32];
-	if (&mipsrec_link_taken) snprintf(lt, sizeof lt, "%lu", mipsrec_link_taken);
+	if (&mipsrec_link_taken) snprintf(lt, sizeof lt, "%u", mipsrec_link_taken);
 	else snprintf(lt, sizeof lt, "na");
 	static const char *er[] = { "running", "done", "stopped", "cap" };
 	printf("STATE gpr=%08x ram=%08x cycle=%08x pc=%08x horizons=%lu link_taken=%s end=%s\n",
