@@ -246,21 +246,34 @@ static int DelayTest(const u32 pc, const u32 bpc)
 /* Revert execution order of opcodes at branch target address and in delay slot
    This emulates the effect of delayed read from COP2 happening in delay slot
    when the branch is taken. This fixes Tekken 2 (broken models). */
-static void recRevDelaySlot(u32 pc, u32 bpc)
+static void recRevDelaySlot(const u32 bd_pc, u32 bpc)
 {
 	//  Set 'branch' to 1 before recompiling *either* opcode, indicating we're
 	// in a BD slot. Even though the opcode at bpc is not in a BD slot, it
 	// could be the first store in a series of stores sharing the same base reg.
 	// Setting 'branch' to 1 ensures just the one store gets emitted.
 
+	//  EROSQ: emitters expect the global 'pc' to point just past the opcode
+	// they compile (recRecompile()/recDelaySlot() advance it first); the LSU
+	// series emitter scans from pc-4. Without this, a load in the BD slot
+	// (always the case here: dt == 2 means a delayed load) saw the branch at
+	// pc-4, counted a zero-length series and walked off guest memory (SEGV
+	// in general_loads_stores at compile time). Restore 'pc' afterwards: the
+	// caller emits the exit sequence and later recDelaySlot() relative to it.
+
+	// (The BD-slot address parameter used to be named 'pc', shadowing the
+	// global.)
 	branch = 1;
 
 	psxRegs.code = OPCODE_AT(bpc);
+	pc = bpc + 4;
 	recBSC[psxRegs.code>>26]();
 
-	psxRegs.code = OPCODE_AT(pc);
+	psxRegs.code = OPCODE_AT(bd_pc);
+	pc = bd_pc + 4;
 	recBSC[psxRegs.code>>26]();
 
+	pc = bd_pc;
 	branch = 0;
 }
 
@@ -458,14 +471,31 @@ static void emitBxxZ(int andlink, u32 bpc, u32 nbpc)
 	//            the call to emitBlockReturnPC(). It affects PC caching.
 
 	// Can block use 'fastpath' return? (branches backward to its beginning)
-	const bool use_fastpath_return = rec_recompile_use_fastpath_return(bpc);
+	//  EROSQ: with the dt == 2 workaround the exit path has already run the
+	//  opcode at bpc and returns to bpc+4, never to the block start.
+	const bool use_fastpath_return = rec_recompile_use_fastpath_return(dt == 2 ? bpc + 4 : bpc);
 
 	regPushState();
+
+	//  EROSQ: the dt == 2 exit path compiles two guest opcodes. Their
+	// compile-time side effects on const propagation and on the LSU $at/$v1
+	// value cache must not leak into the fall-through path, which never runs
+	// that code (regPushState() only covers the register cache).
+	iRegisters rev_iregs[32];
+#ifdef USE_LSU_CACHING
+	lsu_tmp_cache_entry_t rev_lsu_cache[LSU_TMP_CACHE_SIZE];
+	const bool rev_lsu_cache_valid = lsu_tmp_cache_valid;
+#endif
+	const bool rev_skip_mflo = skip_emitting_next_mflo;
 
 	if (dt == 2) {
 		// BD slot trickery has been detected: use a workaround.
 		// Fixes gfx glitches in 'Tekken 2'
 
+		memcpy(rev_iregs, iRegs, sizeof(iRegs));
+#ifdef USE_LSU_CACHING
+		memcpy(rev_lsu_cache, lsu_tmp_cache, sizeof(lsu_tmp_cache));
+#endif
 		NOP();  // <BD slot>
 		recRevDelaySlot(pc, bpc);
 		bpc += 4;
@@ -492,6 +522,15 @@ static void emitBxxZ(int andlink, u32 bpc, u32 nbpc)
 	rec_recompile_end_part2(use_fastpath_return);
 
 	regPopState();
+
+	if (dt == 2) {
+		memcpy(iRegs, rev_iregs, sizeof(iRegs));
+#ifdef USE_LSU_CACHING
+		memcpy(lsu_tmp_cache, rev_lsu_cache, sizeof(lsu_tmp_cache));
+		lsu_tmp_cache_valid = rev_lsu_cache_valid;
+#endif
+		skip_emitting_next_mflo = rev_skip_mflo;
+	}
 
 	fixup_branch(backpatch);
 	regUnlock(br1);
