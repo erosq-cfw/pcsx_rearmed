@@ -1243,9 +1243,10 @@ static int recInit()
 
 	recMem = (u32*)recMemBase;
 
-	{	/* EROSQ block linking phase 1 (BLOCKLINK.md); default off */
+	{	/* EROSQ block linking (BLOCKLINK.md): default 3 = shared trampoline;
+		 * EROSQ_BLOCKLINK=0 is the kill-switch (classic dispatch loop only) */
 		const char *e = getenv("EROSQ_BLOCKLINK");
-		blocklink_mode = e ? atoi(e) : 0;
+		blocklink_mode = e ? atoi(e) : 3;
 		if (blocklink_mode)
 			printf("mipsrec: block linking (slot-direct exits) mode %d\n", blocklink_mode);
 	}

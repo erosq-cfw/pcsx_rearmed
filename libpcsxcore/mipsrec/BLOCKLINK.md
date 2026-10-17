@@ -1,7 +1,7 @@
 # mipsrec block linking (EROSQ, 2026-10-17)
 
 Status: **phase 1 implemented; offline differential PASS (research hlink 4000/4000, mutations caught); device checks in progress** on branch `blocklink` (off `dt2fix` 720f492). The kill-switch is
-`EROSQ_BLOCKLINK` (default 0 = off). It is not shipped.
+`EROSQ_BLOCKLINK=0`. Default (env unset) = mode 3, the shared trampoline.
 
 ## Why
 The PC sampler on the shipped df17906f puts the dispatch loop (`loop3212` = the 16-instruction body
@@ -93,3 +93,13 @@ phase 1, at a much higher correctness cost. Not started.
 2. Device: gate (MGS + GT2 4/4, PaRappa XA), all 16 SD games boot, menu open/resume ×3,
    savestate save/load, ≥30 min soak of Crash + GT2 attract loops, TR4 path.
 3. A/B in one binary (BLOCKLINK 0 vs 1) + PMON + sampler dispatcher share before/after.
+
+## Results (device, 1200 MHz, same binary, median r1/r2)
+- Mode 1 (inline, +13 words per exit) vs off: Ape +2.3/+1.9, MGS +1.4/+1.2, Crash +0.6/+2.3,
+  Spyro +0.7/+3.1, TR +2.0/+0.4, **GT2 -1.7/-2.5** (ITLB +20%).
+- Mode 3 (trampoline, +2 words per exit) vs off: GT2 -0.4/+1.7, Ape +4.6/+1.3, MGS +0.7/+0.9,
+  Crash +2.6/+0.7, Spyro +0.2/+1.8, TR +1.2/+0.1. PMON cycles/frame: Crash -1.3%, GT2 -0.5%.
+  GT2 mode 3 vs mode 1: +2.8/+0.4.
+- Linked exits taken: ~1.87M/s on Crash (~31k per frame).
+- Correctness: 16/16 SD games boot; menu x3; gate PASS (MGS/GT2 hashes 4/4, PaRappa XA);
+  60-min soak (mode 1 code) PASS; hlink (research) 4000/4000 + controls; lsu_bounds 0/5520.
