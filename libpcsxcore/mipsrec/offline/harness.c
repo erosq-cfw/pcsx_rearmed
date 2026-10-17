@@ -16,10 +16,14 @@ int main(int argc, char **argv)
 	if (getenv("FM")) mipsrec_rec_harness_faultmem();
 	mipsrec_rec_harness_direct_returns((unsigned long)mipsrec_rec_cur() + 0x100000, (unsigned long)mipsrec_rec_cur() + 0x100040);
 	FILE *f = fopen(argv[1], "rb");
-	size_t n = fread(psxRegs.ptrs.psxM + 0x10000, 1, 0x1f0000, f); fclose(f);
-	fprintf(stderr, "loaded %zu bytes at 0x80010000\n", n);
+	/* RAM2M=1: argv[1] is a full 2 MB PSX RAM image (e.g. from a savestate) */
+	size_t n = getenv("RAM2M") ? fread(psxRegs.ptrs.psxM, 1, 0x200000, f)
+	                           : fread(psxRegs.ptrs.psxM + 0x10000, 1, 0x1f0000, f);
+	fclose(f);
+	fprintf(stderr, "loaded %zu bytes at %s\n", n, getenv("RAM2M") ? "0x80000000" : "0x80010000");
 	FILE *fl = fopen(argv[2], "r");
 	unsigned a, e, nf = 0, nb = 0;
+	unsigned char *h_all = mipsrec_rec_cur();
 	const char *dump = getenv("DUMP_AT");   /* hex guest addr of a function to dump */
 	unsigned dumpa = dump ? strtoul(dump, 0, 16) : 0;
 	while (fscanf(fl, "%x %x", &a, &e) == 2) {
@@ -34,6 +38,10 @@ int main(int argc, char **argv)
 		}
 	}
 	fprintf(stderr, "functions %u, blocks %u\n", nf, nb);
+	if (getenv("DUMP_ALL")) {   /* whole emitted region, for pattern census */
+		FILE *o = fopen(getenv("DUMP_ALL"), "wb");
+		if (o) { fwrite(h_all, 1, (unsigned char *)mipsrec_rec_cur() - h_all, o); fclose(o); }
+	}
 	mipsrec_emitstat_dump();
 	return 0;
 }

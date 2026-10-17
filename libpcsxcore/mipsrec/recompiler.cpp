@@ -1325,11 +1325,14 @@ static void recShutdown()
 {
 	REC_LOG("Shutting down\n");
 
-	if (psx_mem_mapped)
-		rec_munmap_psx_mem();
+	/* EROSQ: the METHOD-1 RAM mirror is mapped once by mipsrec_init_mmap()
+	 * (from psxMemInit) and is never unmapped (rec_munmap_psx_mem is inert),
+	 * so keep psx_mem_mapped. Clearing it made every recInit after a
+	 * Shutdown/Init cycle (LoadState of a state whose HLE flag differs from
+	 * the config) emit METHOD-2 slow-path memory code for the session. */
 	if (rec_mem_mapped)
 		rec_munmap_rec_mem();
-	psx_mem_mapped = rec_mem_mapped = false;
+	rec_mem_mapped = false;
 }
 
 
