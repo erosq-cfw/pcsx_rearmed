@@ -364,6 +364,12 @@ static inline bool IsFuzzyScratchpadAddr(const u32 reg)  { return iRegs[reg].is_
  */
 #define RECMEM_SIZE         (12 * 1024 * 1024)
 #define RECMEM_SIZE_MAX     (RECMEM_SIZE-(512*1024))
+/* EROSQ: effective code-cache cap (EROSQ_RECMEM_KB, default 4 MB). The 12 MB
+ * array is BSS: every page the JIT writes stays resident (or in zram) until
+ * the cache fills, and GT2 recompiles per-race code overlays, so a long GT2
+ * session ran a 32 MB device out of memory (RSS+swap +7 MB in 12 min, OOM at
+ * ~15-20 min). recReset() now also MADV_DONTNEEDs the cache. */
+static size_t recmem_max = 4u << 20;
 static u8 recMemBase[RECMEM_SIZE] __attribute__((aligned(4)));
 
 u32        *recMem;                /* Where does next emitted opcode in block go? */
@@ -1113,7 +1119,7 @@ static void recRecompile()
 				fprintf(stderr, "RECSTAT peak=%uKB resets=%lu\n",
 					(unsigned)(peak >> 10), resets);
 		}
-		if (used >= RECMEM_SIZE_MAX) {
+		if (used >= recmem_max) {
 			resets++;
 			if (recstat)
 				fprintf(stderr, "RECSTAT cache full -> flush #%lu\n", resets);
@@ -1242,6 +1248,14 @@ static int recInit()
 	REC_LOG("Initializing\n");
 
 	recMem = (u32*)recMemBase;
+
+	{	/* EROSQ code-cache cap (see recmem_max) */
+		const char *e = getenv("EROSQ_RECMEM_KB");
+		size_t kb = e ? strtoul(e, NULL, 0) : 4096;
+		if (kb < 1024) kb = 1024;
+		if (kb > (RECMEM_SIZE_MAX >> 10)) kb = RECMEM_SIZE_MAX >> 10;
+		recmem_max = kb << 10;
+	}
 
 	{	/* EROSQ block linking (BLOCKLINK.md): default 3 = shared trampoline;
 		 * EROSQ_BLOCKLINK=0 is the kill-switch (classic dispatch loop only) */
@@ -2523,6 +2537,10 @@ static void recReset()
 	memset(recRAM, 0, REC_RAM_SIZE);
 	memset(recROM, 0, REC_ROM_SIZE);
 
+	/* EROSQ: give the code-cache pages back (BSS, private anon -> zero
+	 * pages on next touch). Only from recompile / init / load paths, never
+	 * while JIT code is executing. */
+	madvise(recMemBase, RECMEM_SIZE, MADV_DONTNEED);
 	recMem = (u32*)recMemBase;
 	fm_tbl_n = 0;      /* faultmem host->guest table: recMem was rewound */
 
