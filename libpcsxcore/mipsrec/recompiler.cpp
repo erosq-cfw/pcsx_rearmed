@@ -1252,7 +1252,7 @@ static int recInit()
 	{	/* EROSQ code-cache cap (see recmem_max) */
 		const char *e = getenv("EROSQ_RECMEM_KB");
 		size_t kb = e ? strtoul(e, NULL, 0) : 4096;
-		if (kb < 1024) kb = 1024;
+		if (kb < 16) kb = 16;   /* tiny values only for tests (forced resets) */
 		if (kb > (RECMEM_SIZE_MAX >> 10)) kb = RECMEM_SIZE_MAX >> 10;
 		recmem_max = kb << 10;
 	}
