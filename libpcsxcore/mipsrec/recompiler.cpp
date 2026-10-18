@@ -2540,7 +2540,7 @@ static void recReset()
 	/* EROSQ: give the code-cache pages back (BSS, private anon -> zero
 	 * pages on next touch). Only from recompile / init / load paths, never
 	 * while JIT code is executing. */
-	madvise(recMemBase, RECMEM_SIZE, MADV_DONTNEED);
+	if (!getenv("EROSQ_NOMADV")) madvise(recMemBase, RECMEM_SIZE, MADV_DONTNEED);
 	recMem = (u32*)recMemBase;
 	fm_tbl_n = 0;      /* faultmem host->guest table: recMem was rewound */
 
