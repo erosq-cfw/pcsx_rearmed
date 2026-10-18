@@ -39,7 +39,7 @@ static void segv(int sig, siginfo_t *si, void *ucv) {
 int mipsrec_rec_init(void); void mipsrec_rec_reset(void); void mipsrec_rec_execute_block(unsigned pc);
 void mipsrec_faultmem_clear_slow(void);
 void mipsrec_faultmem_stats(unsigned long *f, unsigned long *s, int *t);
-void mipsrec_emitstat_dump(void); void mipsrec_faultmem_set(int on); void mipsrec_rec_execute(void); void mipsrec_rec_harness_faultmem(void);
+void mipsrec_emitstat_dump(void); void mipsrec_jitsched_set(int on); void mipsrec_jitsched_stats(unsigned long *, unsigned long *, unsigned long *); void mipsrec_faultmem_set(int on); void mipsrec_rec_execute(void); void mipsrec_rec_harness_faultmem(void);
 extern R3000Acpu psxInt, psxRec;
 static const u32 ptrs[7] = { 0x80100000, 0xa0100400, 0x00700800, 0x1f800000, 0x1f801000, 0xbf801000, 0x9f800100 };
 #define SENT 0x80020000u
@@ -90,16 +90,22 @@ int main(int argc, char **argv)
 	{ extern void psxRcntInit(void); psxRcntInit(); }
 	psxInt.Init();
 	struct snap a, b;
-	/* reference = classic dual-path JIT (production), test = faultmem JIT */
+	/* reference = classic dual-path JIT (production), test = faultmem JIT.
+	 * HX_SCHED=1: reference = unscheduled, test = EROSQ_JITSCHED-scheduled,
+	 * both in the EROSQ_FAULTMEM mode. */
+	const int fm_test = getenv("EROSQ_FAULTMEM") && getenv("EROSQ_FAULTMEM")[0] == '0' ? 0 : 1;
+	const int sched = getenv("HX_SCHED") != 0;
 	psxCpu = &psxRec;
 	mipsrec_rec_harness_faultmem();
-	mipsrec_faultmem_set(0);
+	mipsrec_faultmem_set(sched ? fm_test : 0);
+	if (sched) mipsrec_jitsched_set(0);
 	setup(seed);
 	mipsrec_rec_reset(); mipsrec_faultmem_clear_slow();
 	run_jit();
 	take(&a);
 	fprintf(stderr, "stage classic ok pc=%08x\n", psxRegs.pc);
-	mipsrec_faultmem_set(getenv("EROSQ_FAULTMEM") && getenv("EROSQ_FAULTMEM")[0] == '0' ? 0 : 1);
+	mipsrec_faultmem_set(fm_test);
+	if (sched) mipsrec_jitsched_set(1);
 	setup(seed);
 	mipsrec_rec_reset(); mipsrec_faultmem_clear_slow();
 	run_jit();
@@ -112,6 +118,7 @@ int main(int argc, char **argv)
 	if (memcmp(a.hw, b.hw, sizeof a.hw)) { bad++; printf("  HW regs differ:");
 		for (int i = 0; i < 0x80; i += 4) if (memcmp(a.hw + i, b.hw + i, 4)) printf(" [1f80%04x] %08x/%08x", 0x1000 + i, *(u32 *)(a.hw + i), *(u32 *)(b.hw + i));
 		printf("\n"); }
-	printf("%s seed=%u faults=%lu slow_blocks=%lu fm_tbl=%d\n", bad ? "FAIL" : "ok", seed, fl, sl, tn);
+	unsigned long jb, jc, jr; mipsrec_jitsched_stats(&jb, &jc, &jr);
+	printf("%s seed=%u faults=%lu slow_blocks=%lu fm_tbl=%d sched_blocks=%lu changed=%lu\n", bad ? "FAIL" : "ok", seed, fl, sl, tn, jb, jc);
 	return bad ? 1 : 0;
 }

@@ -11,7 +11,7 @@
 # horizon budget 7..400 cycles, start cycle 0 or just below the u32 wrap.
 # Failures are minimised (fewer blocks / steps, same seed) and kept in
 # $S/hl/fail-<seed>.S with a one-line repro command.
-# Env: S (scratch dir), W (pcsx tree with built objects), NOBUILD=1,
+# Env: S (scratch dir), W (pcsx tree with built objects), NOBUILD=1, HL_A_MODE (side A link mode, 0),
 # HX_TIMEOUT (s per run, 120), MINIMISE=0 (skip minimising, for mutants).
 set -u
 S=${S:-/tmp/hl}
@@ -49,7 +49,7 @@ one() {
   mipsel-buildroot-linux-musl-ld -Ttext=0x80010000 -e test -o $S/$tag.elf $S/$tag.o && mipsel-buildroot-linux-musl-objcopy -O binary -j .text $S/$tag.elf $S/$tag.bin
   local env="HX_BUDGET=$budget HX_CYCLE0=$c0 HX_STOP_AFTER=$sa ${XENV:-}"
   local a b
-  a=$(env $env ${HL_A_ENV:-} EROSQ_BLOCKLINK=0 timeout ${HX_TIMEOUT:-120} $QEMU $S/hlink $S/$tag.bin 2>&1 | grep '^STATE' || echo "STATE crash-or-timeout")
+  a=$(env $env ${HL_A_ENV:-} EROSQ_BLOCKLINK=${HL_A_MODE:-0} timeout ${HX_TIMEOUT:-120} $QEMU $S/hlink $S/$tag.bin 2>&1 | grep '^STATE' || echo "STATE crash-or-timeout")
   b=$(env $env ${HL_B_ENV:-} EROSQ_BLOCKLINK=${HL_MODE:-2} timeout ${HX_TIMEOUT:-120} $QEMU $S/hlink $S/$tag.bin 2>&1 | grep '^STATE' || echo "STATE crash-or-timeout")
   local ka=$(echo "$a" | sed 's/ link_taken=[^ ]*//') kb=$(echo "$b" | sed 's/ link_taken=[^ ]*//')
   local lt=$(echo "$b" | grep -o 'link_taken=[^ ]*' | cut -d= -f2)

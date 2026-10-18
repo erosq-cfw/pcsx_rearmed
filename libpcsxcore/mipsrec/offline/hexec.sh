@@ -4,8 +4,8 @@
 # S= below is the scratch dir holding the corpus and build products; adjust.
 #!/bin/bash
 # hexec.sh N_SEEDS [FAULTMEM(1/0)] : generate + assemble + run N random tests
-S=/tmp/es
-W=pcsx_rearmed-ideas
+S=${S:-/tmp/es}
+W=${W:-$(cd "$(dirname "$0")/../../.." && pwd)}
 export PATH=buildroot-2026.08/output/host/bin:$PATH
 cd $W
 OBJS=$(ls libpcsxcore/*.o libpcsxcore/mipsrec/*.o | grep -v emu_if)
