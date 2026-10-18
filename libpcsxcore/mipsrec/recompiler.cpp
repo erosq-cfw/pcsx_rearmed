@@ -2540,7 +2540,15 @@ static void recReset()
 	/* EROSQ: give the code-cache pages back (BSS, private anon -> zero
 	 * pages on next touch). Only from recompile / init / load paths, never
 	 * while JIT code is executing. */
-	if (!getenv("EROSQ_NOMADV")) madvise(recMemBase, RECMEM_SIZE, MADV_DONTNEED);
+	/* madvise needs a page-aligned start (recMemBase is only 4-aligned: the
+	 * unaligned call failed with EINVAL and freed nothing). Whole pages inside
+	 * the array only -- never the BSS neighbours sharing its edge pages. */
+	if (!getenv("EROSQ_NOMADV")) {
+		const uptr pg = (uptr)sysconf(_SC_PAGESIZE), lo = ((uptr)recMemBase + pg - 1) & ~(pg - 1);
+		const uptr hi = ((uptr)recMemBase + RECMEM_SIZE) & ~(pg - 1);
+		if (madvise((void *)lo, hi - lo, MADV_DONTNEED) != 0)
+			perror("mipsrec: code-cache madvise");
+	}
 	recMem = (u32*)recMemBase;
 	fm_tbl_n = 0;      /* faultmem host->guest table: recMem was rewound */
 
