@@ -21,7 +21,7 @@ MODE: "ctl:KIND" -> a counted control loop (see ctl() below), STEPS iterations
                           stops it via psxRegs.stop (menu) after N horizons.
 Fixed addresses: code at 0x80010000, data/table area at TAB (below).
 """
-import random, sys
+import os, random, sys
 
 seed = int(sys.argv[1])
 nb = int(sys.argv[2]) if len(sys.argv) > 2 else 8
@@ -39,6 +39,8 @@ DATA = 0x80031000
 #   dt2-jal dt2-bal dt2-bxxz -> dt==2 workaround (BD = load read by target): 0
 #   dt2-j dt2-bxx         -> same BD trick at sites w/o the workaround: STEPS-1
 #   self                  -> branch to own block start (fastpath): 0
+#   rom                   -> the loop lives in BIOS ROM (j + bgtz between two
+#                            ROM blocks: explicit-slot exits): 2*(STEPS-1)
 #   long<K>               -> K filler insns before 'j T' (cycles > 0x7fff
 #                            test, harness sets the cycle multiplier)
 CTL_SITES = {
@@ -57,7 +59,12 @@ def ctl(kind):
          "  lui $t9, %hi(ctab)\n  addiu $t9, $t9, %lo(ctab)",
          "  lw $s6, 12($t9)\n  lw $t5, 0($t9)\n  nop\n  jr $t5\n  nop",
          "LOOP:\n  addiu $s7, $s7, -1"]
-    if kind == "self":
+    if kind == "rom":
+        # whole loop runs in BIOS ROM (hlink writes it there with HX_ROMLOOP=1):
+        # R0: addiu s7,-1; j R1 / R1: addiu v0,3; bgtz s7,R0 / jr EXIT
+        o[-1] = "LOOP:"
+        o.append("  lui $t5, 0xbfc0\n  ori $t5, $t5, 0x1000\n  jr $t5\n  nop")
+    elif kind == "self":
         o.append("  bgtz $s7, LOOP\n  nop")
     elif kind.startswith("long"):
         o += ["  addiu $v0, $v0, 1"] * int(kind[4:]) + ["  j T\n  nop"]
@@ -143,6 +150,8 @@ for i in range(nb):
             e(f"  lw $t2, {R.randrange(0, 64) * 4}($s6)\n  nop\n  addu $v0, $v0, $t2")
         elif r < 0.68:
             e(f"  sw {R.choice(ACC)}, {R.randrange(0, 64) * 4}($s6)")
+        elif os.environ.get("GL_NOSMC"):
+            e(f"  addiu $a2, $a2, {R.randrange(1, 100)}")   # GL_NOSMC: no stores into code
         else:
             # SMC: rewrite a patch word of block j (first word = jump target,
             # or the middle patch word), via the table (non-const) or const
@@ -223,6 +232,6 @@ for i in range(nb):
     e(f"  .word B{i}")
 e(f"  .word {DATA:#x}")
 for i in range(nb):
-    e(f"  .word B{i}_m")
+    e(f"  .word B{i}" if os.environ.get("GL_NOMID") else f"  .word B{i}_m")   # GL_NOMID: no mid-block SMC (reset-differential mode)
 e("  .word L0")
 print("\n".join(o))

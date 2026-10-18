@@ -87,10 +87,24 @@ int main(int argc, char **argv)
 	*(u32 *)(ram + (SENT & 0x1fffff) + 4) = 0;
 	for (int i = 0; i < 0x400; i += 4) *(u32 *)(ram + (DATA & 0x1fffff) + i) = 0x9e3779b9u * (i + 1);
 
+	if (getenv("HX_ROMLOOP")) {   /* gen_link ctl:rom: 2-block linked loop in ROM */
+		u32 *r = (u32 *)(psxRegs.ptrs.psxR + 0x1000), b = 0xbfc01000u;
+		r[0] = 0x26f7ffff;                                   /* R0: addiu s7,s7,-1 */
+		r[1] = 0x08000000 | (((b + 0x10) >> 2) & 0x3ffffff); /*     j R1 */
+		r[2] = 0;
+		r[3] = 0;
+		r[4] = 0x24420003;                                   /* R1: addiu v0,v0,3 */
+		r[5] = 0x1ee00000 | ((((b) - (b + 0x14 + 4)) >> 2) & 0xffff);   /* bgtz s7,R0 */
+		r[6] = 0;
+		r[7] = 0x8f2d0004;                                   /*     lw t5,4(t9)  (EXIT) */
+		r[8] = 0;
+		r[9] = 0x01a00008;                                   /*     jr t5 */
+		r[10] = 0;
+	}
 	memset(&psxRegs.GPR, 0, sizeof psxRegs.GPR);
 	psxRegs.GPR.r[31] = SENT;
 	psxRegs.GPR.r[29] = 0x801ffff0;
-	psxRegs.pc = CODE;
+	psxRegs.pc = getenv("HX_PC") ? strtoul(getenv("HX_PC"), 0, 0) : CODE;   /* e.g. 0x00010000 (kuseg) */
 	psxRegs.cycle = cycle0;
 	psxRegs.next_interupt = cycle0 + budget;
 	psxRegs.interrupt = 0;

@@ -1,6 +1,7 @@
 #!/bin/bash
 # hlink.sh N [FIRST_SEED]   random programs, per-class pass counts
 # hlink.sh ctl              exact-count controls per linked site kind (below)
+# hlink.sh reset N        code-cache-reset differential (16 KB cache, no SMC; HL_RESET_BOTH=1 = both sides)
 # Block-linking differential test: generate N programs (gen_link.py), run each
 # through the real mipsrec in the SAME binary with EROSQ_BLOCKLINK=0 and =2 (HL_MODE=4: trampoline)
 # (qemu-user), compare final GPRs / RAM hash / psxRegs.cycle / pc / horizon
@@ -48,8 +49,8 @@ one() {
   mipsel-buildroot-linux-musl-ld -Ttext=0x80010000 -e test -o $S/$tag.elf $S/$tag.o && mipsel-buildroot-linux-musl-objcopy -O binary -j .text $S/$tag.elf $S/$tag.bin
   local env="HX_BUDGET=$budget HX_CYCLE0=$c0 HX_STOP_AFTER=$sa ${XENV:-}"
   local a b
-  a=$(env $env EROSQ_BLOCKLINK=0 timeout ${HX_TIMEOUT:-120} $QEMU $S/hlink $S/$tag.bin 2>&1 | grep '^STATE' || echo "STATE crash-or-timeout")
-  b=$(env $env EROSQ_BLOCKLINK=${HL_MODE:-2} timeout ${HX_TIMEOUT:-120} $QEMU $S/hlink $S/$tag.bin 2>&1 | grep '^STATE' || echo "STATE crash-or-timeout")
+  a=$(env $env ${HL_A_ENV:-} EROSQ_BLOCKLINK=0 timeout ${HX_TIMEOUT:-120} $QEMU $S/hlink $S/$tag.bin 2>&1 | grep '^STATE' || echo "STATE crash-or-timeout")
+  b=$(env $env ${HL_B_ENV:-} EROSQ_BLOCKLINK=${HL_MODE:-2} timeout ${HX_TIMEOUT:-120} $QEMU $S/hlink $S/$tag.bin 2>&1 | grep '^STATE' || echo "STATE crash-or-timeout")
   local ka=$(echo "$a" | sed 's/ link_taken=[^ ]*//') kb=$(echo "$b" | sed 's/ link_taken=[^ ]*//')
   local lt=$(echo "$b" | grep -o 'link_taken=[^ ]*' | cut -d= -f2)
   if [ "$ka" != "$kb" ]; then echo "FAIL diff off:[$a] on:[$b]"; return; fi
@@ -63,15 +64,25 @@ one() {
   echo "PASS $b"
 }
 
+# hlink.sh reset N [FIRST_SEED]: code-cache-reset differential. Programs without
+# stores into code (GL_NOSMC=1: the JIT only invalidates the written word, so
+# mid-block SMC legitimately differs once a reset recompiles stale blocks from
+# current RAM), a 16 KB code cache (a reset every few blocks) on side A
+# (linking off) and, with HL_RESET_BOTH=1, on side B (linked) too.
+if [ "${1:-}" = reset ]; then
+  shift
+  export GL_NOSMC=1 HL_A_ENV="${HL_A_ENV:-} EROSQ_RECMEM_KB=16"
+  [ -n "${HL_RESET_BOTH:-}" ] && export HL_B_ENV="${HL_B_ENV:-} EROSQ_RECMEM_KB=16"
+fi
 if [ "${1:-}" = ctl ]; then
   # one constant-target exit per iteration, everything else indirect:
   # taken must equal ITERS-1 for linked kinds and 0 for the exclusions.
   # long<K>: cycle_multiplier 0x2000 = 32 cycles/insn; block = addiu + K + j + nop.
   IT=50; L=$((IT - 1)); cf=0   # first pass: target not compiled yet -> slot 0 -> loop
   for spec in j:$L b:$L jal:$L bal:$L bxxz:$L bxx:$L dt2-j:$L dt2-bxx:$L \
-              dt2-jal:0 dt2-bal:0 dt2-bxxz:0 self:0 long1020:$L long1021:0 j:$L:4294967040 bxx:$L:4294967040; do   # last two: start 256 cycles below the u32 wrap
+              dt2-jal:0 dt2-bal:0 dt2-bxxz:0 self:0 rom:$((2 * L)) long1020:$L long1021:0 j:$L:4294967040 bxx:$L:4294967040; do   # last two: start 256 cycles below the u32 wrap
     IFS=: read k x c0 <<< "$spec"; c0=${c0:-0}
-    case $k in long*) XENV="HX_MULT=0x2000"; bud=4000000;; *) XENV=; bud=100000;; esac
+    case $k in long*) XENV="HX_MULT=0x2000"; bud=4000000;; rom) XENV="HX_ROMLOOP=1"; bud=100000;; *) XENV=; bud=100000;; esac
     r=$(XENV=$XENV EXPECT=$x one 1 ctl:$k 0 $IT $bud $c0 0 c); [[ $r == PASS* ]] || cf=$((cf+1))
     printf "  ctl %-9s c0=%-10s expect=%-3s %s\n" $k $c0 $x "$r"
   done
