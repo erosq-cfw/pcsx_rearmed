@@ -30,7 +30,6 @@
  * defines the memory/cycle/writeok seams these files expect. See
  * libpcsxcore/mipsrec/compat.h for details. */
 #include "compat.h"
-#include "jitsched.h"
 
 #include <stddef.h>
 #include "../psxcommon.h"
@@ -372,8 +371,9 @@ static inline bool IsFuzzyScratchpadAddr(const u32 reg)  { return iRegs[reg].is_
  * ~15-20 min). recReset() now also MADV_DONTNEEDs the cache. */
 static size_t recmem_max = 4u << 20;
 static u8 recMemBase[RECMEM_SIZE] __attribute__((aligned(4)));
-static int jitsched_on, jitsched_stat;
-static unsigned long js_blocks, js_changed, js_regions;
+extern int jitsched_on;                       /* jitsched.cpp */
+void jitsched_init(void);
+void jitsched_run(u32 *start, u32 *end);
 
 u32        *recMem;                /* Where does next emitted opcode in block go? */
 
@@ -1228,16 +1228,12 @@ static void recRecompile()
 	} while (!end_block);
 
 	/* EROSQ_JITSCHED: reorder straight-line regions to hide load/mul-use
-	 * interlocks (jitsched.h). In place, same size: fm_tbl (block end only),
-	 * PC_REC (block start) and all resolved branch offsets are unaffected. */
-	if (jitsched_on > 0) {
-		const int c = jitsched_block((uint32_t *)recMemStart, (uint32_t *)recMem);
-		js_blocks++;
-		js_changed += c != 0;
-		js_regions += c;
-		if (jitsched_stat && (js_blocks & 4095) == 0)
-			fprintf(stderr, "jitsched: %lu blocks, %lu changed, %lu regions\n", js_blocks, js_changed, js_regions);
-	}
+	 * interlocks (jitsched.cpp). In place, same size: fm_tbl (block end only),
+	 * PC_REC (block start) and all resolved branch offsets are unaffected.
+	 * Lives in its own object so this TU's code/data layout matches the
+	 * scheduler-less build when it is off. */
+	if (jitsched_on > 0)
+		jitsched_run(recMemStart, recMem);
 
 	if (faultmem_block_used) {
 		fm_tbl_end[fm_tbl_n] = (u32)(uptr)recMem;
@@ -1279,13 +1275,7 @@ static int recInit()
 		if (blocklink_mode)
 			printf("mipsrec: block linking (slot-direct exits) mode %d\n", blocklink_mode);
 	}
-	{	/* EROSQ instruction scheduler: default OFF until device-validated */
-		const char *e = getenv("EROSQ_JITSCHED");
-		jitsched_on = e ? atoi(e) : 0;
-		jitsched_stat = getenv("EROSQ_JITSCHED_STAT") != NULL;
-		if (jitsched_on > 0)
-			printf("mipsrec: jitsched on\n");
-	}
+	jitsched_init();   /* EROSQ_JITSCHED, default OFF until device-validated */
 
 	/* ponytail: the upstream pcsx4all code did
 	 *     memset(recMemBase, 0xff, RECMEM_SIZE_MAX + 0x1000);
@@ -2626,6 +2616,3 @@ extern "C" void mipsrec_rec_harness_direct_returns(uintptr_t loop, uintptr_t fas
 extern "C" void mipsrec_rec_harness_faultmem(void) { fm_install(); }
 extern "C" void mipsrec_faultmem_clear_slow(void) { memset(fm_slow, 0, sizeof fm_slow); fm_slow_n = 0; }
 extern "C" void mipsrec_faultmem_set(int on) { fm_enabled(); fm_on = on; }
-extern "C" void mipsrec_jitsched_set(int on) { jitsched_on = on; }
-extern "C" void mipsrec_jitsched_stats(unsigned long *blocks, unsigned long *changed, unsigned long *regions)
-{ *blocks = js_blocks; *changed = js_changed; *regions = js_regions; }

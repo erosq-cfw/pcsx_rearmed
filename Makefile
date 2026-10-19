@@ -576,6 +576,11 @@ endif
 
 # misc
 OBJS += frontend/main.o frontend/plugin.o
+ifeq "$(DYNAREC)" "mipsrec"
+# EROSQ_JITSCHED glue + scheduler: linked LAST so its code lands at the end of
+# .text and no hot code (dispatch loops, gpu_unai spans) moves when it is off
+OBJS += libpcsxcore/mipsrec/jitsched.o
+endif
 frontend/main.o libpcsxcore/misc.o: CFLAGS += -DBUILTIN_GPU=$(BUILTIN_GPU)
 
 frontend/menu.o frontend/main.o: include/revision.h
