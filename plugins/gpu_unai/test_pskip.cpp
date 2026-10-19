@@ -8,8 +8,13 @@
  * so all 8 phases (including the lane-1 wrap at phase 7) are exercised via
  * randomized dst offsets.
  *
- * Build & run (host, no deps):
- *   g++ -O2 -o /tmp/test_pskip plugins/gpu_unai/test_pskip.cpp && /tmp/test_pskip
+ * Build & run (cross + qemu-user: gpu_inner.h pulls in gpu_inner_mxu.h only
+ * under __mips__; GPU_MXU_HOST_TEST swaps the MXU ops for C models, so no MXU
+ * hardware/emulation is needed; -fpermissive: the harness casts to const
+ * le16_t* fields that are non-const):
+ *   B=buildroot-2026.08/output/host
+ *   $B/bin/mipsel-buildroot-linux-musl-g++ -O2 -fpermissive -Iinclude -o /tmp/test_pskip \
+ *     plugins/gpu_unai/test_pskip.cpp && qemu-mipsel-static -L $B/mipsel-buildroot-linux-musl/sysroot /tmp/test_pskip
  *
  * Same host-model scheme as test_sprite_tile_kernels.cpp; additionally
  * models Q16ADD(WW,AA) and Q16SLR (per-16-bit-lane add / logical shift),

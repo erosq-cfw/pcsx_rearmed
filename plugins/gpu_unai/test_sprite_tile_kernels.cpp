@@ -1,9 +1,13 @@
 /* EROSQ host differential test: X1000 sprite/tile fast paths vs the scalar
  * drivers, on randomized textures/CLUTs/windows/widths/alignments.
  *
- * Build & run (host, no deps):
- *   g++ -O2 -o /tmp/test_sprite_tile plugins/gpu_unai/test_sprite_tile_kernels.cpp \
- *     && /tmp/test_sprite_tile
+ * Build & run (cross + qemu-user: gpu_inner.h pulls in gpu_inner_mxu.h only
+ * under __mips__; GPU_MXU_HOST_TEST swaps the MXU ops for C models, so no MXU
+ * hardware/emulation is needed; -fpermissive: the harness casts to const
+ * le16_t* fields that are non-const):
+ *   B=buildroot-2026.08/output/host
+ *   $B/bin/mipsel-buildroot-linux-musl-g++ -O2 -fpermissive -Iinclude -o /tmp/test_sprite_tile_kernels \
+ *     plugins/gpu_unai/test_sprite_tile_kernels.cpp && qemu-mipsel-static -L $B/mipsel-buildroot-linux-musl/sysroot /tmp/test_sprite_tile_kernels
  *
  * The two asm cores (mxu_light_pair, mxu_blend_pair_sub) are swapped for
  * their exact C models via GPU_MXU_HOST_TEST (models = the semantics the
