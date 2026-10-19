@@ -21,7 +21,7 @@ static void jitsched_init(void)
 	jitsched_on = e ? atoi(e) : 0;
 	jitsched_stat = getenv("EROSQ_JITSCHED_STAT") != NULL;
 	if (jitsched_on > 0)
-		printf("mipsrec: jitsched on\n");
+		fprintf(stderr, "mipsrec: jitsched on\n");   /* stderr: unbuffered, survives SIGTERM */
 }
 
 /* called by recRecompile once per emitted block [start, end); also keeps the
