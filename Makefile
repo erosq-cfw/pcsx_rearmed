@@ -577,9 +577,18 @@ endif
 # misc
 OBJS += frontend/main.o frontend/plugin.o
 ifeq "$(DYNAREC)" "mipsrec"
-# EROSQ_JITSCHED glue + scheduler: linked LAST so its code lands at the end of
-# .text and no hot code (dispatch loops, gpu_unai spans) moves when it is off
+# EROSQ_JITSCHED: the scheduler's code/rodata go to .jitsched_text/_rodata,
+# which jitsched.ld appends after every existing section, and its .bss comes
+# last (last object), so with the scheduler off no pre-existing symbol moves.
+# No per-function sections (one .text to rename), no unwind tables (would
+# grow .eh_frame, which precedes .plt).
 OBJS += libpcsxcore/mipsrec/jitsched.o
+LDFLAGS += -Wl,-T,libpcsxcore/mipsrec/jitsched.ld
+libpcsxcore/mipsrec/jitsched.o: libpcsxcore/mipsrec/jitsched.cpp libpcsxcore/mipsrec/jitsched.h
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -fno-function-sections -fno-data-sections -fno-exceptions -fno-asynchronous-unwind-tables -fno-unwind-tables $(AUTODEPFLAGS) -c $< -o $@.tmp
+	$(patsubst %g++,%objcopy,$(CXX)) --rename-section .text=.jitsched_text \
+		$$($(patsubst %g++,%readelf,$(CXX)) -SW $@.tmp | sed -n 's/.*\] \(\.rodata[^ ]*\) .*/--rename-section \1=.jitsched_rodata/p') $@.tmp $@
+	rm -f $@.tmp
 endif
 frontend/main.o libpcsxcore/misc.o: CFLAGS += -DBUILTIN_GPU=$(BUILTIN_GPU)
 

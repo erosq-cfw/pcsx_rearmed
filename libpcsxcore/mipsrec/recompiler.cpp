@@ -371,9 +371,8 @@ static inline bool IsFuzzyScratchpadAddr(const u32 reg)  { return iRegs[reg].is_
  * ~15-20 min). recReset() now also MADV_DONTNEEDs the cache. */
 static size_t recmem_max = 4u << 20;
 static u8 recMemBase[RECMEM_SIZE] __attribute__((aligned(4)));
-extern int jitsched_on;                       /* jitsched.cpp */
-void jitsched_init(void);
-void jitsched_run(u32 *start, u32 *end);
+int jitsched_tail(u32 *start, u32 *end, int es, unsigned long long *es_blocks,   /* jitsched.cpp */
+		  unsigned long long *es_block_bytes, unsigned long long *es_block_guest, u32 bytes, u32 guest);
 
 u32        *recMem;                /* Where does next emitted opcode in block go? */
 
@@ -1102,6 +1101,20 @@ extern "C" void mipsrec_faultmem_stats(unsigned long *faults, unsigned long *slo
 	*faults = fm_faults; *slow_blocks = fm_slow_n; *tbl = fm_tbl_n;
 }
 
+/* End-of-block work lives in jitsched_tail() (jitsched.cpp): EROSQ_JITSCHED
+ * (reorder straight-line regions to hide load/mul-use interlocks; in place,
+ * same size, so fm_tbl (block end only), PC_REC (block start) and resolved
+ * branch offsets are unaffected) plus the emitstat block counters, which it
+ * updates through pointers. jitsched.o's code and rodata are appended after
+ * every existing section (jitsched.ld) and recRecompile is padded back to its
+ * pre-jitsched size, so with the scheduler off no pre-existing symbol moves
+ * (device A/B: a layout that shifted gpu_unai/dispatch code by +32..+4672 B
+ * read ~0.5% slower). A new function in this TU would add an .eh_frame FDE,
+ * which moves .plt. */
+#ifndef JITSCHED_RECOMPILE_PAD
+#define JITSCHED_RECOMPILE_PAD "9"   /* (2840 - unpadded size) / 4: re-derive after ANY recompiler.cpp change */
+#endif
+
 static void recRecompile()
 {
 	// Notify plugin_lib that we're recompiling (affects frameskip timing)
@@ -1227,30 +1240,20 @@ static void recRecompile()
 		regUpdate();
 	} while (!end_block);
 
-	/* EROSQ_JITSCHED: reorder straight-line regions to hide load/mul-use
-	 * interlocks (jitsched.cpp). In place, same size: fm_tbl (block end only),
-	 * PC_REC (block start) and all resolved branch offsets are unaffected.
-	 * Lives in its own object so this TU's code/data layout matches the
-	 * scheduler-less build when it is off. */
-	if (jitsched_on > 0)
-		jitsched_run(recMemStart, recMem);
-
 	if (faultmem_block_used) {
 		fm_tbl_end[fm_tbl_n] = (u32)(uptr)recMem;
 		fm_tbl_pc[fm_tbl_n] = oldpc;
 		fm_tbl_n++;
 	}
 
-	if (es_on > 0) {
-		es_blocks++;
-		es_block_bytes += (u8 *)recMem - es_blk0;
-		es_block_guest += (pc - es_pc0) / 4;
-		if ((es_blocks & 4095) == 0)
-			mipsrec_emitstat_dump_(stderr);
-	}
+	if (jitsched_tail(recMemStart, recMem, es_on > 0, &es_blocks, &es_block_bytes, &es_block_guest,
+			  (u8 *)recMem - es_blk0, (pc - es_pc0) / 4))
+		mipsrec_emitstat_dump_(stderr);
 
 	DISASM_HOST();
 	clear_insn_cache(recMemStart, recMem, 0);
+	/* keep recRecompile at its pre-jitsched size (see the jitsched_tail note) */
+	asm volatile(".rept " JITSCHED_RECOMPILE_PAD "\n\tnop\n\t.endr");
 }
 
 
@@ -1275,7 +1278,6 @@ static int recInit()
 		if (blocklink_mode)
 			printf("mipsrec: block linking (slot-direct exits) mode %d\n", blocklink_mode);
 	}
-	jitsched_init();   /* EROSQ_JITSCHED, default OFF until device-validated */
 
 	/* ponytail: the upstream pcsx4all code did
 	 *     memset(recMemBase, 0xff, RECMEM_SIZE_MAX + 0x1000);

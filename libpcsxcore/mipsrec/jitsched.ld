@@ -1,0 +1,8 @@
+/* EROSQ_JITSCHED: append the scheduler's code and read-only data after every
+ * existing read-only/executable section, so nothing pre-existing moves
+ * (augments the default linker script). */
+SECTIONS
+{
+  .jitsched : { *(.jitsched_text) *(.jitsched_rodata) }
+}
+INSERT AFTER .plt;
