@@ -18,7 +18,7 @@ static void jitsched_init(void)
 {
 	jitsched_inited = 1;
 	const char *e = getenv("EROSQ_JITSCHED");
-	jitsched_on = e ? atoi(e) : 0;
+	jitsched_on = e ? atoi(e) : 1;   /* default ON; EROSQ_JITSCHED=0 is the kill-switch */
 	jitsched_stat = getenv("EROSQ_JITSCHED_STAT") != NULL;
 	if (jitsched_on > 0)
 		fprintf(stderr, "mipsrec: jitsched on\n");   /* stderr: unbuffered, survives SIGTERM */

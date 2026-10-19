@@ -1,10 +1,16 @@
-# JITSCHED — post-emission instruction scheduler (CLOSED 2026-10-19, not merged)
+# JITSCHED — post-emission instruction scheduler (REOPENED for shipping 2026-10-19)
 
 `jitsched.h` reorders the host words of each freshly emitted block inside
-straight-line regions to hide X1000 load-use / mul-use interlocks. Behind
-`EROSQ_JITSCHED=1` (default off). Branch `jit-sched`, kept unmerged.
+straight-line regions to hide X1000 load-use / mul-use interlocks. Default ON;
+`EROSQ_JITSCHED=0` is the kill-switch.
 
-## Verdict
+Status: closed on the cross-binary criterion, then REOPENED on the
+in-binary evidence (=0 -> =1 +0.85/+0.38/+0.69% GT2, PMON discarded -6..-7.7%):
+the cross-binary deltas were inside the per-file noise floor that psx later
+measured (a byte-identical copy of shipped reads -0.64..+1.17% vs shipped).
+Ship validation is in-binary (=0 vs =1, ABBA) on a clean-recipe build.
+
+## History of the verdict
 
 The scheduler works but does not beat the shipped binary by more than noise,
 so it does not ship.
