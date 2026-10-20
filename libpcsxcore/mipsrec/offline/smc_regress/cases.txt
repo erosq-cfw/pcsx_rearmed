@@ -4,6 +4,10 @@
 # write goes through a table (non-const) pointer, so inline invalidation sees it.
 #
 # CLASS MUST_MATCH: inline must equal fresh (a difference fails hlink.sh coh).
+#   Mutant check 2026-10-20 (recipe, not a switch): rec_lsu.cpp.h
+#   LSU_skip_code_invalidation 'if (!emit_code_invalidations)' -> 'if (1)',
+#   recompile recompiler.o from the build log line, rerun: all 8 MUST_MATCH runs
+#   FAIL (exit 8); restore the file and recompiler.o.
 # CLASS KNOWN_INLINE_DIFF: documented accepted deviation. Inline SMC invalidation
 #   zeroes only the block-start slot of the written word; a guest store into a
 #   LATER word of an already-compiled block, with no cache flush, keeps running the
