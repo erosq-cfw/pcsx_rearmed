@@ -25,9 +25,15 @@ extern void *g_menuscreen_ptr, *g_menubg_ptr;
 extern void *pl_vout_buf;
 void mipsrec_blkprof_dump(const char *path) __attribute__((weak));
 void mipsrec_jitsched_stats(unsigned long *, unsigned long *, unsigned long *) __attribute__((weak));
+void mipsrec_blkext_stats(size_t *, size_t *) __attribute__((weak));
 static void js_print(const char *at)
 {
 	unsigned long b, c, r;
+	size_t xb, xp;
+	if (mipsrec_blkext_stats) {
+		mipsrec_blkext_stats(&xb, &xp);
+		fprintf(stderr, "[hx] blkext %s: bytes=%zu peak=%zu\n", at, xb, xp);
+	}
 	if (!mipsrec_jitsched_stats) return;
 	mipsrec_jitsched_stats(&b, &c, &r);
 	fprintf(stderr, "[hx] jitsched %s: blocks=%lu changed=%lu regions=%lu\n", at, b, c, r);
