@@ -13,7 +13,7 @@
 
 /* all zero-initialised (.bss, appended last): a .data entry would move
  * every pre-existing .data/.bss symbol */
-static int jitsched_inited, jitsched_on, jitsched_stat;
+static int jitsched_inited, jitsched_on, jitsched_stat, blkext_stat;
 static unsigned long js_blocks, js_changed, js_regions;
 
 static void jitsched_init(void)
@@ -22,6 +22,7 @@ static void jitsched_init(void)
 	const char *e = getenv("EROSQ_JITSCHED");
 	jitsched_on = e ? atoi(e) : 1;   /* default ON; EROSQ_JITSCHED=0 is the kill-switch */
 	jitsched_stat = getenv("EROSQ_JITSCHED_STAT") != NULL;
+	blkext_stat = getenv("EROSQ_BLKEXT_STAT") != NULL;
 	if (jitsched_on > 0)
 		fprintf(stderr, "mipsrec: jitsched on\n");   /* stderr: unbuffered, survives SIGTERM */
 }
@@ -81,7 +82,11 @@ static void bx_register(uint32_t s, uint32_t e)
 		}
 		bx_list[p][bx_n[p]++] = (struct bx){ s, e };
 	}
-	if (bx_bytes > bx_peak) bx_peak = bx_bytes;
+	if (bx_bytes > bx_peak) {
+		if (blkext_stat && (bx_bytes >> 12) != (bx_peak >> 12))   /* each new 4 KB step */
+			fprintf(stderr, "blkext: peak %zu bytes\n", bx_bytes);
+		bx_peak = bx_bytes;
+	}
 }
 
 /* called by recRecompile (via jitsched_tail) for every block: host entry,
