@@ -101,7 +101,8 @@ static void mipsrec_execute_block(struct psxRegisters *regs, enum blockExecCalle
 	}
 }
 
-static void mipsrec_clear(u32 addr, u32 size) { mipsrec_rec_clear(addr, size); }
+void mipsrec_blkext_clear(u32 addr, u32 size);   /* jitsched.cpp: + blocks overlapping from before */
+static void mipsrec_clear(u32 addr, u32 size) { mipsrec_blkext_clear(addr, size); }
 
 /* Notify enum translation. rearmed's enum R3000Anote (r3000a.h) is:
  *   CACHE_ISOLATED=0, CACHE_UNISOLATED=1, BEFORE_SAVE=2, AFTER_LOAD=3,
