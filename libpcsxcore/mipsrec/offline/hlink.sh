@@ -2,6 +2,7 @@
 # hlink.sh N [FIRST_SEED]   random programs, per-class pass counts
 # hlink.sh ctl              exact-count controls per linked site kind (below)
 # hlink.sh reset N        code-cache-reset differential (16 KB cache, no SMC; HL_RESET_BOTH=1 = both sides)
+# hlink.sh coh            SMC-coherence oracle over smc_regress/cases.txt (inline vs fresh reference, below)
 # Block-linking differential test: generate N programs (gen_link.py), run each
 # through the real mipsrec in the SAME binary with EROSQ_BLOCKLINK=0 and =2 (HL_MODE=4: trampoline)
 # (qemu-user), compare final GPRs / RAM hash / psxRegs.cycle / pc / horizon
@@ -69,6 +70,62 @@ one() {
 # mid-block SMC legitimately differs once a reset recompiles stale blocks from
 # current RAM), a 16 KB code cache (a reset every few blocks) on side A
 # (linking off) and, with HL_RESET_BOTH=1, on side B (linked) too.
+# hlink.sh coh -- SMC-coherence oracle (ported from gt2-pageprot a01b7d9, 2026-10-20).
+# For every fixture in smc_regress/cases.txt, with faultmem off and on, runs
+#   inline  the normal mipsrec (EROSQ_BLOCKLINK=${COH_LINK:-3}, the shipped default)
+#   fresh   the same + HX_FRESH=1 HX_BUDGET=1: the code cache is flushed at every
+#           block exit, so every block is compiled from RAM as of its entry --
+#           the block-entry-coherence reference (spin programs stop at the
+#           inline run's final cycle, HX_STOP_CYCLE)
+#   interp  HX_INT=1 (term programs; reported only: it also sees writes AHEAD
+#           of the pc inside the running block, which no block JIT does)
+# and compares inline vs fresh on GPRs + RAM hash (+ pc for spin programs).
+# Column 9 of cases.txt is the fixture's class:
+#   MUST_MATCH         inline must equal fresh -> a difference FAILS
+#   KNOWN_INLINE_DIFF  accepted deviation: inline invalidation zeroes only the
+#                      block-start slot of the written word, so a guest store into
+#                      a LATER word of an already-compiled block (no cache flush)
+#                      runs stale code until the next flush. Differences are
+#                      expected; a match is reported ("now matches"), not a failure.
+# Exit status = number of MUST_MATCH runs that differ (or crashed / failed to build).
+# COH_ONLY='seed ...' restricts to those fixtures.
+if [ "${1:-}" = coh ]; then
+  cf=0; tot=0; kd=0; km=0; iagree=0; ichk=0
+  key() { echo "$1" | awk '/^STATE/{print $2, $3, ($9=="end=stopped" ? $5 : "")}'; }
+  while read env s nb st mode b c0 sa cls why; do
+    case "$env" in \#*|"") continue;; esac
+    [ -n "${COH_ONLY:-}" ] && ! [[ " $COH_ONLY " == *" $s "* ]] && continue
+    case "$cls" in MUST_MATCH|KNOWN_INLINE_DIFF) ;; *) echo "  seed $s: bad class '$cls' in cases.txt"; cf=$((cf+1)); continue;; esac
+    if ! { env ${env//,/ } python3 $OFF/gen_link.py $s $nb $st $mode > $S/c.S &&
+      mipsel-buildroot-linux-musl-gcc -mips1 -msoft-float -mno-abicalls -fno-pic -G0 -c $S/c.S -o $S/c.o 2>/dev/null &&
+      mipsel-buildroot-linux-musl-ld -Ttext=0x80010000 -e test -o $S/c.elf $S/c.o && mipsel-buildroot-linux-musl-objcopy -O binary -j .text $S/c.elf $S/c.bin; }; then
+      echo "  seed $s: build failed"; cf=$((cf+1)); continue
+    fi
+    for fm in 0 1; do
+      cb="EROSQ_FAULTMEM=$fm EROSQ_BLOCKLINK=${COH_LINK:-3} HX_CYCLE0=$c0"
+      a=$(env $cb HX_BUDGET=$b HX_STOP_AFTER=$sa timeout ${HX_TIMEOUT:-120} $QEMU $S/hlink $S/c.bin 2>&1)
+      stopc=$(echo "$a" | grep -o 'cycle=[0-9a-f]*' | head -1 | cut -d= -f2)
+      fx=""; [ "$mode" = spin ] && fx="HX_STOP_CYCLE=0x$stopc"
+      f=$(env $cb HX_FRESH=1 HX_BUDGET=1 $fx timeout ${HX_TIMEOUT:-120} $QEMU $S/hlink $S/c.bin 2>&1)
+      tot=$((tot+1))
+      ka=$(key "$a") kf=$(key "$f") ist=""
+      if [ "$mode" = term ]; then
+        i=$(HX_INT=1 timeout ${HX_TIMEOUT:-120} $QEMU $S/hlink $S/c.bin 2>&1 | awk '/^STATE/ && /end=done/{print $2, $3}')
+        if [ -n "$i" ]; then ichk=$((ichk+1)); [ "$i " = "$kf" ] && { iagree=$((iagree+1)); ist=" interp=fresh"; } || ist=" interp!=fresh"; else ist=" interp=n/a"; fi
+      fi
+      if [ -z "$ka" ] || [ -z "$kf" ] || ! echo "$a" | grep -q 'end=\(done\|stopped\)' || ! echo "$f" | grep -q 'end=\(done\|stopped\)'; then
+        res="ERROR(no-end)"; cf=$((cf+1))
+      elif [ "$ka" = "$kf" ]; then
+        res=match; [ $cls = KNOWN_INLINE_DIFF ] && { km=$((km+1)); res="match (KNOWN_INLINE_DIFF now matches)"; }
+      elif [ $cls = MUST_MATCH ]; then res="DIFFER -> FAIL [inline $ka | fresh $kf]"; cf=$((cf+1))
+      else res="differ (known)"; kd=$((kd+1)); fi
+      printf "  seed %-4s %-5s fm%s %-17s %s%s\n" $s $mode $fm $cls "$res" "$ist"
+    done
+  done < $OFF/smc_regress/cases.txt
+  echo "hlink coh: runs=$tot fail=$cf known-diff=$kd known-but-matched=$km (interpreter == fresh in $iagree of $ichk term runs)"
+  exit $cf
+fi
+
 if [ "${1:-}" = reset ]; then
   shift
   export GL_NOSMC=1 HL_A_ENV="${HL_A_ENV:-} EROSQ_RECMEM_KB=16"

@@ -22,6 +22,10 @@ MODE: "ctl:KIND" -> a counted control loop (see ctl() below), STEPS iterations
 Fixed addresses: code at 0x80010000, data/table area at TAB (below).
 """
 import os, random, sys
+# GL_NOCONSTSMC=1: code writes through a const pointer (lui/addiu) become table
+# (non-const) ones -- same RNG draws, so the program is otherwise identical.
+# Inline SMC invalidation never covered const-address stores (hlink.sh coh uses this).
+NOCONST = os.environ.get('GL_NOCONSTSMC') == '1'
 
 seed = int(sys.argv[1])
 nb = int(sys.argv[2]) if len(sys.argv) > 2 else 8
@@ -106,7 +110,7 @@ e("W2:")
 # with an iteration-dependent immediate every pass, then jumps back to L0.
 # Correct only if every rewrite invalidates L0 (slot reads 0 / new block).
 iters = R.randrange(3, 12)
-via_table = R.random() < 0.5
+via_table = R.random() < 0.5 or NOCONST
 e(f"  li $t6, {iters}")
 e("  j L0\n  nop")
 e("L0:\n  addiu $v1, $v1, 1\n  addiu $t6, $t6, -1\n  blez $t6, L2\n  nop\n  j L1\n  nop")
@@ -158,7 +162,7 @@ for i in range(nb):
             j = tgt if R.random() < 0.5 else R.randrange(nb)   # often the block we jump to next
             k = R.randrange(1, 1000) + 1000 * R.randrange(0, 30)
             word = 0x24630000 | (k & 0xffff)          # addiu $v1,$v1,k
-            if R.random() < 0.6:
+            if R.random() < 0.6 or NOCONST:
                 # &B<j> (first word = jump target) or &B<j>_m (middle word)
                 slot = j if R.random() < 0.6 else nb + 1 + j
                 e(f"  lw $t3, {slot * 4}($t9)\n  nop")

@@ -1,0 +1,48 @@
+# SMC coherence fixtures for hlink.sh coh (inline mipsrec vs the HX_FRESH reference).
+# ENV seed nblocks steps mode budget cycle0 stop_after CLASS reason...
+# ENV = comma-separated gen_link.py switches. All use GL_NOCONSTSMC=1: every code
+# write goes through a table (non-const) pointer, so inline invalidation sees it.
+#
+# CLASS MUST_MATCH: inline must equal fresh (a difference fails hlink.sh coh).
+# CLASS KNOWN_INLINE_DIFF: documented accepted deviation. Inline SMC invalidation
+#   zeroes only the block-start slot of the written word; a guest store into a
+#   LATER word of an already-compiled block, with no cache flush, keeps running the
+#   stale block until the next flush. Expected to differ on master; a match is
+#   reported, not a failure. Reasons (first divergence, found by bisecting inline
+#   horizons against fresh and matching the v1 delta to the responsible store):
+#   mid-block write   - store into B<j>_m, a middle word of the block started at B<j>
+#   merged target     - store into B<j>'s first word, but the preceding block ends in
+#                       'b B<j>' to the very next insn: the branch is dropped and B<j>
+#                       compiles as the middle of that block
+#   fastpath self-loop- a block rewrites its own first word and then branches back to
+#                       its own start; the fastpath return re-enters the compiled block
+#                       without a slot lookup (needs a large horizon budget)
+#
+# 18 fixtures from gt2-pageprot a01b7d9 (2026-10-18 triage). All 18 differ on master
+# c152a14 (2026-10-20, faultmem off and on, EROSQ_BLOCKLINK=3):
+GL_NOCONSTSMC=1,GL_NOMID=1 96 3 51 term 99 0 0 KNOWN_INLINE_DIFF fastpath self-loop (B1 writes B1, bgtz B1)
+GL_NOCONSTSMC=1,GL_NOMID=1 175 10 67 spin 51 4294957870 225 KNOWN_INLINE_DIFF merged target (B8 writes B1; B0 ends 'b B1')
+GL_NOCONSTSMC=1,GL_NOMID=1 338 5 83 term 220 0 0 KNOWN_INLINE_DIFF fastpath self-loop (B3 writes B3)
+GL_NOCONSTSMC=1,GL_NOMID=1 401 4 97 term 94 0 0 KNOWN_INLINE_DIFF merged target (B0 writes B1; B0 ends 'b B1')
+GL_NOCONSTSMC=1 2 5 134 term 122 0 0 KNOWN_INLINE_DIFF mid-block write (B4 writes B4_m)
+GL_NOCONSTSMC=1 13 8 141 term 320 4294955452 0 KNOWN_INLINE_DIFF mid-block write (B4 writes B3_m)
+GL_NOCONSTSMC=1 16 3 63 term 94 4294952719 0 KNOWN_INLINE_DIFF mid-block write (B1 writes B0_m)
+GL_NOCONSTSMC=1 22 9 37 term 27 4294947253 0 KNOWN_INLINE_DIFF mid-block write (B0 writes B0_m)
+GL_NOCONSTSMC=1 32 3 111 term 172 0 0 KNOWN_INLINE_DIFF mid-block write (B1 writes B0_m)
+GL_NOCONSTSMC=1 50 5 77 spin 356 0 100 KNOWN_INLINE_DIFF mid-block write (B0/B2 write B2_m)
+GL_NOCONSTSMC=1 69 8 213 term 208 0 0 KNOWN_INLINE_DIFF mid-block write (B5 writes B5_m)
+GL_NOCONSTSMC=1 70 8 250 spin 261 4294963525 120 KNOWN_INLINE_DIFF mid-block write (B7 writes B0_m)
+GL_NOCONSTSMC=1 82 5 36 term 127 4294952593 0 KNOWN_INLINE_DIFF mid-block write (B4 writes B4_m)
+GL_NOCONSTSMC=1 85 8 202 spin 286 4294949860 135 KNOWN_INLINE_DIFF mid-block write (B5 writes B5_m)
+GL_NOCONSTSMC=1 89 4 76 term 113 0 0 KNOWN_INLINE_DIFF mid-block write (B2 writes B2_m)
+GL_NOCONSTSMC=1 90 4 95 spin 166 0 140 KNOWN_INLINE_DIFF mid-block write (B2 writes B0_m)
+GL_NOCONSTSMC=1 91 5 56 term 219 4294944394 0 KNOWN_INLINE_DIFF mid-block write (B3 writes B1_m)
+GL_NOCONSTSMC=1 104 3 38 term 138 0 0 KNOWN_INLINE_DIFF mid-block write (B0 writes B0_m)
+#
+# MUST_MATCH controls (added 2026-10-20): first-word table writes only, none into a
+# merged or fastpath-looping block (hlink.sh params for the seed), so inline
+# slot invalidation is exactly block-entry coherent. A difference here is a regression.
+GL_NOCONSTSMC=1,GL_NOMID=1 3 6 171 term 100000 0 0 MUST_MATCH 5 first-word stores
+GL_NOCONSTSMC=1,GL_NOMID=1 5 8 245 spin 281 0 55 MUST_MATCH 5 first-word stores
+GL_NOCONSTSMC=1,GL_NOMID=1 13 8 141 term 320 4294955452 0 MUST_MATCH 4 first-word stores (seed-13 twin above, minus mid-block)
+GL_NOCONSTSMC=1,GL_NOMID=1 21 8 437 term 359 0 0 MUST_MATCH 11 first-word stores
