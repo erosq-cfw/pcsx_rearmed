@@ -12,6 +12,14 @@
  * or after HX_STOP_AFTER horizons (spin programs: stop inside a chain).
  * The start cycle can sit just below the u32 wrap (HX_CYCLE0).
  *
+ * Coherence-oracle knobs (hlink.sh coh):
+ *   HX_FRESH=1      mipsrec_rec_reset() at every horizon (with HX_BUDGET=1:
+ *                   every block exit), so every block is compiled from RAM
+ *                   as of its entry -- the block-entry-coherence reference.
+ *   HX_STOP_CYCLE=N stop at the first horizon with cycle >= N (spin programs:
+ *                   the fresh run stops where the inline run stopped).
+ *   HX_INT=1        interpreter reference (HX_INT_CYCLES=N for spin programs).
+ *
  * Output: "STATE gpr=<hash> ram=<hash> cycle=<u32> pc=<u32> horizons=<n>
  *          link_taken=<n|na> end=<done|stopped|cap>"
  */
@@ -25,7 +33,7 @@
 #include "psxmem.h"
 
 int mipsrec_rec_init(void); void mipsrec_rec_reset(void); void mipsrec_rec_execute(void);
-extern R3000Acpu psxRec;
+extern R3000Acpu psxRec, psxInt;
 extern char __bss_start[], _end[];
 void psxRcntInit(void);
 /* exported by the blocklink build; weak until then */
@@ -41,6 +49,8 @@ extern u32 cycle_multiplier;
 static u32 budget = 64;
 static unsigned long horizons, stop_after, cap = 4000000;
 static int end_reason;   /* 0 running, 1 done, 2 stopped(spin), 3 cap */
+static int fresh;        /* HX_FRESH */
+static u32 stop_cycle;   /* HX_STOP_CYCLE */
 
 extern void (*mipsrec_irq_test_hook)(psxCP0Regs *cp0);
 static void test_irq(psxCP0Regs *cp0)
@@ -52,6 +62,10 @@ static void test_irq(psxCP0Regs *cp0)
 	else if (stop_after && horizons >= stop_after && !end_reason) { end_reason = 2; psxRegs.stop = 1; }
 	else if (horizons >= cap && !end_reason) { end_reason = 3; psxRegs.stop = 1; }
 	psxRegs.next_interupt = psxRegs.cycle + budget;
+	/* HX_FRESH: flush the code cache here -- runs from the dispatcher's
+	 * branch-test call (mipsrec_branch_test), never inside block code. */
+	if (fresh) mipsrec_rec_reset();
+	if (stop_cycle && (s32)(psxRegs.cycle - stop_cycle) >= 0 && !end_reason) { end_reason = 2; psxRegs.stop = 1; }
 }
 
 static u32 fnv(const void *p, size_t n, u32 h)
@@ -71,6 +85,8 @@ int main(int argc, char **argv)
 	size_t codelen = fread(code, 1, sizeof code, f); fclose(f);
 	if (getenv("HX_BUDGET")) budget = strtoul(getenv("HX_BUDGET"), 0, 0);
 	if (getenv("HX_STOP_AFTER")) stop_after = strtoul(getenv("HX_STOP_AFTER"), 0, 0);
+	fresh = getenv("HX_FRESH") != 0;
+	if (getenv("HX_STOP_CYCLE")) stop_cycle = strtoul(getenv("HX_STOP_CYCLE"), 0, 0);
 	u32 cycle0 = getenv("HX_CYCLE0") ? strtoul(getenv("HX_CYCLE0"), 0, 0) : 0;
 
 	if (psxMemInit()) return 1;
@@ -113,7 +129,22 @@ int main(int argc, char **argv)
 	psxRegs.stop = 0;
 	psxRegs.CP0.n.SR = 0x10000000;
 
-	mipsrec_rec_execute();
+	if (getenv("HX_INT")) {
+		/* HX_INT=1: interpreter reference (fetches every instruction from RAM,
+		 * so SMC is architecturally immediate). It never reaches the hook:
+		 * step blocks and poll DONE (term programs). HX_INT_CYCLES=N (spin
+		 * programs) stops at the first block boundary with cycle >= N. */
+		psxCpu = &psxInt;
+		psxInt.Init(); psxInt.Reset();
+		const u32 stopc = getenv("HX_INT_CYCLES") ? strtoul(getenv("HX_INT_CYCLES"), 0, 0) : 0;
+		end_reason = 3;
+		for (unsigned long n = 0; n < 20000000ul; n++) {
+			psxInt.ExecuteBlock(&psxRegs, 0);
+			if (*(u32 *)(ram + (DONE & 0x1fffff)) == DONE_MAGIC) { end_reason = 1; break; }
+			if (stopc && (s32)(psxRegs.cycle - stopc) >= 0) { end_reason = 2; break; }
+		}
+	} else
+		mipsrec_rec_execute();
 
 	u32 g = fnv(psxRegs.GPR.r, 26 * 4, 2166136261u);            /* r0..r25 */
 	g = fnv(&psxRegs.GPR.r[28], 4 * 4, g);                       /* gp sp fp ra */
