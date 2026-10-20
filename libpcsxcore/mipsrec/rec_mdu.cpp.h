@@ -67,24 +67,16 @@ static void recMULT()
 			const_res = true;
 			lo_res = (s32)res;
 			hi_res = (s32)(res >> 32);
-		} else if ((rs_const && (abs((int)rs_val) == 1)) || (rt_const && (abs((int)rt_val) == 1))) {
-			// If one of the operands is known to be const-val '+/-1', result is identity
-			//  (with negation if val is -1)
+		} else if ((rs_const && rs_val == 1) || (rt_const && rt_val == 1)) {
+			// If one of the operands is known to be const-val '1', result is identity
+			//  (not done for -1: negating INT_MIN overflows, see below)
 
 			u32 ident_reg_psx = rs_const ? _Rt_ : _Rs_;
 			u32 ident_reg = regMipsToHost(ident_reg_psx, REG_LOAD, REG_REGISTER);
 
-			u32 work_reg = ident_reg;
-			bool negate_res = rs_const ? (rs_val < 0) : (rt_val < 0);
-
-			if (negate_res) {
-				SUBU(TEMP_1, 0, work_reg);
-				work_reg = TEMP_1;
-			}
-
-			SW(work_reg, PERM_REG_1, offGPR(32)); // LO
+			SW(ident_reg, PERM_REG_1, offGPR(32)); // LO
 			// Upper word is all 0s or 1s depending on sign of LO result
-			SRA(TEMP_1, work_reg, 31);
+			SRA(TEMP_1, ident_reg, 31);
 			SW(TEMP_1, PERM_REG_1, offGPR(33));   // HI
 
 			regUnlock(ident_reg);
@@ -94,29 +86,25 @@ static void recMULT()
 		} else {
 			// If one of the operands is a const power-of-two, we can get result by shifting
 
-			// Determine which operand is const power-of-two value, if any
-			bool rs_pot = rs_const && (rs_val != 0x80000000) && ((abs((int)rs_val) & (abs((int)rs_val) - 1)) == 0);
-			bool rt_pot = rt_const && (rt_val != 0x80000000) && ((abs((int)rt_val) & (abs((int)rt_val) - 1)) == 0);
+			// Determine which operand is const power-of-two value, if any.
+			//  Positive only: for a negative one we'd negate the other
+			//  operand, which is wrong when it is INT_MIN. (Also no abs():
+			//  abs(INT_MIN) is UB and GCC used it to drop an INT_MIN guard.)
+			bool rs_pot = rs_const && (rs_val > 0) && ((rs_val & (rs_val - 1)) == 0);
+			bool rt_pot = rt_const && (rt_val > 0) && ((rt_val & (rt_val - 1)) == 0);
 
 			if (rs_pot || rt_pot) {
 				u32 npot_reg_psx = rs_pot ? _Rt_ : _Rs_;
 				u32 npot_reg = regMipsToHost(npot_reg_psx, REG_LOAD, REG_REGISTER);
 
 				// Count trailing 0s of const power-of-two operand to get left-shift amount
-				u32 pot_val = rs_pot ? (u32)abs((int)rs_val) : (u32)abs((int)rt_val);
+				u32 pot_val = rs_pot ? (u32)rs_val : (u32)rt_val;
 				u32 shift_amt = __builtin_ctz(pot_val);
 
-				u32 work_reg = npot_reg;
-				bool negate_res = rs_pot ? (rs_val < 0) : (rt_val < 0);
-				if (negate_res) {
-					SUBU(TEMP_2, 0, npot_reg);
-					work_reg = TEMP_2;
-				}
-
-				SLL(TEMP_1, work_reg, shift_amt);
+				SLL(TEMP_1, npot_reg, shift_amt);
 				SW(TEMP_1, PERM_REG_1, offGPR(32)); // LO
 				// Sign-extend here when computing upper word of result
-				SRA(TEMP_1, work_reg, (32 - shift_amt));
+				SRA(TEMP_1, npot_reg, (32 - shift_amt));
 				SW(TEMP_1, PERM_REG_1, offGPR(33)); // HI
 
 				regUnlock(npot_reg);
@@ -309,8 +297,8 @@ static void recDIV()
 
 			ADDIU(TEMP_2, 0, -1);
 			SLT(TEMP_1, rs, 0);           // TEMP_1 = dividend < 0
-			MOVN(TEMP_1, TEMP_2, TEMP_1); // if (TEMP_1 != 0) TEMP_1 = TEMP_2
-			SW(TEMP_1, PERM_REG_1, offGPR(32)); // LO
+			MOVN(TEMP_2, TEMP_1, TEMP_1); // if (TEMP_1 != 0) TEMP_2 = TEMP_1 (+1)
+			SW(TEMP_2, PERM_REG_1, offGPR(32)); // LO
 			SW(rs, PERM_REG_1, offGPR(33));     // HI
 
 			regUnlock(rs);
@@ -330,8 +318,15 @@ static void recDIV()
 			return;
 		} else if (rs_const) {
 			// If both operands are known-const, compute result statically
-			u32 lo_res = rs_val / rt_val;
-			u32 hi_res = rs_val % rt_val;
+			//  (signed; INT_MIN / -1 gives LO = INT_MIN, HI = 0, as psxDIV)
+			u32 lo_res, hi_res;
+			if (rs_val == 0x80000000 && rt_val == 0xffffffff) {
+				lo_res = 0x80000000;
+				hi_res = 0;
+			} else {
+				lo_res = (u32)((s32)rs_val / (s32)rt_val);
+				hi_res = (u32)((s32)rs_val % (s32)rt_val);
+			}
 
 			if (lo_res) {
 				LI32(TEMP_1, lo_res);
@@ -350,35 +345,31 @@ static void recDIV()
 			// We're done
 			return;
 		} else {
-			// If divisor is a const power-of-two, we can get result by shifting
-			bool rt_pot = (rt_val != 0x80000000) && ((abs((int)rt_val) & (abs((int)rt_val) - 1)) == 0);
+			// If divisor is a const +/- power-of-two (not +/-1 or INT_MIN),
+			//  we can get result by shifting. DIV truncates toward zero, so
+			//  bias a negative dividend by (2^k - 1) before the SRA:
+			//   LO = (rs + ((rs >> 31) >>> (32 - k))) >> k, negated if rt < 0
+			//   HI = rs - ((rs / 2^k) << k)   (sign follows the dividend)
+			bool negate_res = ((s32)rt_val < 0);
+			u32 pot_val = negate_res ? -rt_val : rt_val;
+			bool rt_pot = (pot_val > 1) && (pot_val != 0x80000000) && ((pot_val & (pot_val - 1)) == 0);
 
 			if (rt_pot) {
 				u32 rs = regMipsToHost(_Rs_, REG_LOAD, REG_REGISTER);
 
 				// Count trailing 0s of const power-of-two divisor to get right-shift amount
-				u32 pot_val = (u32)abs((int)rt_val);
 				u32 shift_amt = __builtin_ctz(pot_val);
 
-				u32 work_reg = rs;
-				bool negate_res = (rt_val < 0);
-
-				if (negate_res) {
-					SUBU(TEMP_2, 0, rs);
-					work_reg = TEMP_2;
-				}
-
-				SRA(TEMP_1, work_reg, shift_amt);
+				SRA(TEMP_1, rs, 31);
+				SRL(TEMP_1, TEMP_1, (32 - shift_amt)); // bias = rs < 0 ? 2^k - 1 : 0
+				ADDU(TEMP_1, rs, TEMP_1);
+				SRA(TEMP_1, TEMP_1, shift_amt);        // TEMP_1 = rs / 2^k (truncated)
+				SLL(TEMP_2, TEMP_1, shift_amt);
+				SUBU(TEMP_2, rs, TEMP_2);              // TEMP_2 = remainder
+				if (negate_res)
+					SUBU(TEMP_1, 0, TEMP_1);
 				SW(TEMP_1, PERM_REG_1, offGPR(32)); // LO
-
-				// Subtract one from pot divisor to get remainder modulo mask
-				if ((pot_val-1) > 0xffff) {
-					LI32(TEMP_1, (pot_val-1));
-					AND(TEMP_1, rs, TEMP_1);
-				} else {
-					ANDI(TEMP_1, rs, (pot_val-1));
-				}
-				SW(TEMP_1, PERM_REG_1, offGPR(33)); // HI
+				SW(TEMP_2, PERM_REG_1, offGPR(33)); // HI
 
 				regUnlock(rs);
 
