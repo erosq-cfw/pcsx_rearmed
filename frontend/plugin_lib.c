@@ -221,7 +221,7 @@ void pl_update_layer_size(int w, int h, int fw, int fh)
 #endif
 
 		// 4:3 that prefers integer scaling
-		imult = fh / h;
+		imult = h > 0 ? fh / h : 1;   /* h from guest GP1(07h) can round to 0 */
 		if (imult < 1)
 			imult = 1;
 		g_layer_w = w * imult;

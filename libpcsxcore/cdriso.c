@@ -1087,6 +1087,8 @@ static int handlechd(const char *isofile) {
 		goto fail_io;
 
 	chd_img->sectors_per_hunk = chd_img->header->hunkbytes / (CD_FRAMESIZE_RAW + SUB_FRAMESIZE);
+	if (chd_img->sectors_per_hunk == 0)   /* malformed CHD (hunk < one sector): divisor below */
+		goto fail_io;
 	chd_img->current_hunk[0] = (unsigned int)-1;
 	chd_img->current_hunk[1] = (unsigned int)-1;
 

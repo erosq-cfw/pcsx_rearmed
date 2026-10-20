@@ -199,6 +199,7 @@ void FeedXA(const xa_decode_t *xap)
 #if 0//def XA_HACK
  iSize=((45500*xap->nsamples)/xap->freq);              // get size
 #else
+ if(!xap->freq) return;                                // savestate-supplied 0 (as spu.c's disc path)
  iSize=((44100*xap->nsamples)/xap->freq);              // get size
 #endif
  if(!iSize) return;                                    // none? bye

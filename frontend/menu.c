@@ -319,6 +319,8 @@ static void menu_sync_config(void)
 		Config.PsxAuto = 0;
 		Config.PsxType = region - 1;
 	}
+	if (psx_clock < 1 || psx_clock > 500)   /* pcsx.cfg is not range-checked */
+		psx_clock = DEFAULT_PSX_CLOCK;
 	Config.cycle_multiplier = 10000 / psx_clock;
 
 	switch (in_type_sel1) {
