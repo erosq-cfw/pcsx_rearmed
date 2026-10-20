@@ -36,11 +36,12 @@ static void jitsched_init(void)
  * every block that starts before a cleared range but overlaps it, then does
  * the normal clear. Cold paths only: emitted code is unchanged.
  *
- * Accepted deviation (documented, not fixed here): the INLINE invalidation
- * emitted after guest stores (rec_lsu.cpp.h) still zeroes only the written
- * word's own slot. A guest store into a later word of a live block, with no
- * cache flush, keeps running the old code until the next flush (BIOS
- * FlushCache / cache isolation -> recClear of all RAM) or code-cache reset.
+ * Accepted deviation (documented, not fixed here): guest stores via the inline
+ * path (rec_lsu.cpp.h, which zeroes only the written word's own slot) into
+ * code of a currently-compiled block -- mid-block words, a block's own first
+ * word on a fastpath self-loop, merged branch targets ('b' to the next insn is
+ * dropped) -- take effect at the next flush / reset / recClear covering it
+ * (BIOS FlushCache / cache isolation -> recClear of all RAM).
  * Real hardware is also stale until the 4 KB I-cache evicts the line. Fixing
  * it exactly costs a check on every guest store; measured offline (GT2 race +
  * boot, Crash boot) no game hit it. hlink.sh coh classifies those fixtures as

@@ -1,0 +1,29 @@
+--- a/libpcsxcore/psxinterpreter.c
++++ b/libpcsxcore/psxinterpreter.c
+@@ -176,9 +176,26 @@
+ 
+ }
+ 
++/* SNAPSHOT (offline coh classification only): code is read from a copy of
++ * guest RAM [0x10000, 0x32000) refreshed on every NON-sequential pc change,
++ * i.e. at what would be a mipsrec block entry when the code cache is flushed
++ * at every horizon (hlink HX_FRESH=1 HX_BUDGET=1). */
++/* ... and after the delay slot of every j/jal/jr/jalr, even to pc+8 (mipsrec
++ * ends the block there; only a b/beq-to-pc+8 is merged). */
++static u32 snap[0x22000 / 4], snap_prev = 1, snap_j;
+ static u32 INT_ATTR fetchNoCache(psxRegisters *regs, const uintptr_t *memRLUT, u32 pc)
+ {
+ 	const u32 *code;
++	int jd = snap_j && --snap_j == 0;
++	if (pc != snap_prev + 4 || jd)
++		memcpy(snap, regs->ptrs.psxM + 0x10000, sizeof snap);
++	snap_prev = pc;
++	if ((pc & 0x1fffff) >= 0x10000 && (pc & 0x1fffff) < 0x32000) {
++		u32 w = snap[((pc & 0x1fffff) - 0x10000) / 4];
++		if ((w >> 26) == 2 || (w >> 26) == 3 || ((w >> 26) == 0 && ((w & 0x3f) == 8 || (w & 0x3f) == 9)))
++			snap_j = 2;
++		return w;
++	}
+ 	if (!psxm_lut((u8 **)&code, regs, pc & ~0x3, 0, memRLUT)) {
+ 		SysPrintf("game crash @%08x, ra=%08x\n", pc, regs->GPR.n.ra);
+ 		intException(regs, pc, R3000E_IBE << 2);

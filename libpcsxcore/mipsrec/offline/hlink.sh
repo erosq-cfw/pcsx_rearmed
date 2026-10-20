@@ -77,16 +77,24 @@ one() {
 #           block exit, so every block is compiled from RAM as of its entry --
 #           the block-entry-coherence reference (spin programs stop at the
 #           inline run's final cycle, HX_STOP_CYCLE)
-#   interp  HX_INT=1 (term programs; reported only: it also sees writes AHEAD
-#           of the pc inside the running block, which no block JIT does)
+#   interp  HX_INT=1 (term programs; reported only: it is coherent per
+#           INSTRUCTION, so it also sees writes ahead of the pc inside the running
+#           block, which no block JIT does). interp!=fresh is that granularity,
+#           not timing: 2026-10-20 all 14 interp!=fresh runs (seeds 2 22 69 82 89
+#           104 401, fm0+fm1) had identical RAM and differed only in v1 (sum of
+#           executed patched immediates); an interpreter re-reading code only at
+#           mipsrec block entries (smc_regress/snapint.patch: non-sequential pc,
+#           or after a j/jal/jr/jalr delay slot) equals fresh on all 16 term
+#           fixtures, GPRs + RAM.
 # and compares inline vs fresh on GPRs + RAM hash (+ pc for spin programs).
 # Column 9 of cases.txt is the fixture's class:
 #   MUST_MATCH         inline must equal fresh -> a difference FAILS
-#   KNOWN_INLINE_DIFF  accepted deviation: inline invalidation zeroes only the
-#                      block-start slot of the written word, so a guest store into
-#                      a LATER word of an already-compiled block (no cache flush)
-#                      runs stale code until the next flush. Differences are
-#                      expected; a match is reported ("now matches"), not a failure.
+#   KNOWN_INLINE_DIFF  accepted deviation: guest stores via the inline path into
+#                      code of a currently-compiled block (mid-block words, a
+#                      block's own first word on a fastpath self-loop, merged
+#                      branch targets) take effect at the next flush / reset /
+#                      recClear covering it. Differences are expected; a match is
+#                      reported ("now matches"), not a failure.
 # Exit status = number of MUST_MATCH runs that differ (or crashed / failed to build).
 # COH_ONLY='seed ...' restricts to those fixtures.
 if [ "${1:-}" = coh ]; then

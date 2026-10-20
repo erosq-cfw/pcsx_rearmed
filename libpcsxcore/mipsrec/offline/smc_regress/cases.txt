@@ -8,11 +8,11 @@
 #   LSU_skip_code_invalidation 'if (!emit_code_invalidations)' -> 'if (1)',
 #   recompile recompiler.o from the build log line, rerun: all 8 MUST_MATCH runs
 #   FAIL (exit 8); restore the file and recompiler.o.
-# CLASS KNOWN_INLINE_DIFF: documented accepted deviation. Inline SMC invalidation
-#   zeroes only the block-start slot of the written word; a guest store into a
-#   LATER word of an already-compiled block, with no cache flush, keeps running the
-#   stale block until the next flush. Expected to differ on master; a match is
-#   reported, not a failure. Reasons (first divergence, found by bisecting inline
+# CLASS KNOWN_INLINE_DIFF: documented accepted deviation. Guest stores via the
+#   inline path into code of a currently-compiled block (mid-block words, a block's
+#   own first word on a fastpath self-loop, merged branch targets) take effect at
+#   the next flush / reset / recClear covering it. Expected to differ on master; a
+#   match is reported, not a failure. Reasons (first divergence, found by bisecting inline
 #   horizons against fresh and matching the v1 delta to the responsible store):
 #   mid-block write   - store into B<j>_m, a middle word of the block started at B<j>
 #   merged target     - store into B<j>'s first word, but the preceding block ends in
