@@ -47,6 +47,24 @@ int jitsched_tail(uint32_t *start, uint32_t *end, int es, unsigned long long *es
 	return (*es_blocks & 4095) == 0;
 }
 
+/* Offline test hook (hlink / smcstress / divtest): when set, called INSTEAD of
+ * gen_interupt() at every horizon (mipsrec_branch_test, plugin.c). NULL in the
+ * emulator; only offline harnesses assign it. A pointer rather than
+ * -Wl,--wrap=gen_interupt, which cannot redirect a call that -flto resolves
+ * inside the merged unit. Lives here (appended .jitsched_text, .bss last) so
+ * arming support moves no existing code or data. */
+union psxCP0Regs_;
+extern "C" void gen_interupt(union psxCP0Regs_ *cp0);
+extern "C" void (*mipsrec_irq_test_hook)(union psxCP0Regs_ *cp0);
+void (*mipsrec_irq_test_hook)(union psxCP0Regs_ *cp0);
+extern "C" void mipsrec_branch_test_hooked(union psxCP0Regs_ *cp0)
+{
+	if (__builtin_expect(mipsrec_irq_test_hook != NULL, 0))
+		mipsrec_irq_test_hook(cp0);
+	else
+		gen_interupt(cp0);
+}
+
 /* offline harness hooks (hexec HX_SCHED, plat_headless) */
 extern "C" void mipsrec_jitsched_set(int on) { jitsched_inited = 1; jitsched_on = on; }
 extern "C" void mipsrec_jitsched_stats(unsigned long *blocks, unsigned long *changed, unsigned long *regions)

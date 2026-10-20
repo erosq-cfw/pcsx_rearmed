@@ -4,7 +4,7 @@
  * Runs one divtest.sh-generated guest program in the interpreter (psxInt, the
  * reference) or the REAL mipsrec (faultmem with HX_FM=1). The program stores
  * LO,HI of every case to RES + 8*i and then writes DONE_MAGIC to DONE.
- * gen_interupt is wrapped (as in smcstress): re-arms a small horizon and stops
+ * gen_interupt is replaced via mipsrec_irq_test_hook (as in smcstress): re-arms a small horizon and stops
  * the run once DONE_MAGIC is seen. Prints one line per case:
  *   R <i> <lo> <hi>
  * followed by
@@ -32,7 +32,8 @@ void psxRcntInit(void);
 
 static unsigned long horizons, cap = 2000000;
 static int done;
-void __wrap_gen_interupt(psxCP0Regs *cp0)
+extern void (*mipsrec_irq_test_hook)(psxCP0Regs *cp0);
+static void test_irq(psxCP0Regs *cp0)
 {
 	(void)cp0;
 	horizons++;
@@ -74,7 +75,8 @@ int main(int argc, char **argv)
 
 	if (psxMemInit()) return 1;
 	if (rec) {
-		if (mipsrec_rec_init()) return 1;
+		mipsrec_irq_test_hook = test_irq;   /* replaces gen_interupt at every horizon */
+	if (mipsrec_rec_init()) return 1;
 		if (getenv("HX_FM")) mipsrec_rec_harness_faultmem();
 	}
 	psxMemReset();

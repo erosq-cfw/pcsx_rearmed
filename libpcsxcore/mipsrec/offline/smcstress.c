@@ -8,7 +8,7 @@
  *   TAB i ADDR   -> word i of the base-address table at TAB
  *   DMA ADDR W   -> phase 2: C-side write of W at ADDR + psxCpu->Clear (as DMA)
  *   P2 ADDR      -> phase 2 entry
- * gen_interupt is wrapped (as in hlink): re-arms a small horizon and stops the
+ * gen_interupt is replaced via mipsrec_irq_test_hook (as in hlink): re-arms a small horizon and stops the
  * run once the guest wrote DONE_MAGIC. Prints
  *   STATE gpr=<hash> ram=<hash> v1=<v1> end=<done|cap> pp=<faults/bd/storms/unprot/verifyfail/protects/verifyblocks>
  */
@@ -35,7 +35,8 @@ void psxRcntInit(void);
 
 static unsigned long horizons, cap = 2000000;
 static int done;
-void __wrap_gen_interupt(psxCP0Regs *cp0)
+extern void (*mipsrec_irq_test_hook)(psxCP0Regs *cp0);
+static void test_irq(psxCP0Regs *cp0)
 {
 	(void)cp0;
 	horizons++;
@@ -75,7 +76,8 @@ int main(int argc, char **argv)
 
 	if (psxMemInit()) return 1;
 	if (rec) {
-		if (mipsrec_rec_init()) return 1;
+		mipsrec_irq_test_hook = test_irq;   /* replaces gen_interupt at every horizon */
+	if (mipsrec_rec_init()) return 1;
 		if (getenv("HX_FM")) mipsrec_rec_harness_faultmem();
 	}
 	psxMemReset();

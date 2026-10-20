@@ -5,7 +5,7 @@
  * and prints its final state. hlink.sh runs it twice in the same binary,
  * EROSQ_BLOCKLINK=0 and =2, and compares.
  *
- * gen_interupt() is replaced (-Wl,--wrap=gen_interupt): every horizon hit
+ * gen_interupt() is replaced (mipsrec_irq_test_hook, plugin.c): every horizon hit
  * re-arms next_interupt = cycle + BUDGET (a small budget, so the inline
  * horizon checks of linked exits fire mid-chain), and stops the run
  * (psxRegs.stop, as the menu does) when the guest has written DONE_MAGIC,
@@ -42,7 +42,8 @@ static u32 budget = 64;
 static unsigned long horizons, stop_after, cap = 4000000;
 static int end_reason;   /* 0 running, 1 done, 2 stopped(spin), 3 cap */
 
-void __wrap_gen_interupt(psxCP0Regs *cp0)
+extern void (*mipsrec_irq_test_hook)(psxCP0Regs *cp0);
+static void test_irq(psxCP0Regs *cp0)
 {
 	(void)cp0;
 	horizons++;
@@ -73,6 +74,7 @@ int main(int argc, char **argv)
 	u32 cycle0 = getenv("HX_CYCLE0") ? strtoul(getenv("HX_CYCLE0"), 0, 0) : 0;
 
 	if (psxMemInit()) return 1;
+	mipsrec_irq_test_hook = test_irq;   /* replaces gen_interupt at every horizon */
 	if (mipsrec_rec_init()) return 1;
 	if (getenv("HX_MULT")) cycle_multiplier = strtoul(getenv("HX_MULT"), 0, 0);  /* ctl:long */
 	psxMemReset();

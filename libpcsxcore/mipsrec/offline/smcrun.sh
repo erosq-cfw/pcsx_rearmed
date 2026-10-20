@@ -20,7 +20,7 @@ if [ -z "${NOBUILD:-}" ]; then
     OBJS=$(ls libpcsxcore/*.o libpcsxcore/mipsrec/*.o | grep -v emu_if)
     mipsel-buildroot-linux-musl-gcc -O2 -DNO_PNG -Iinclude -Ilibpcsxcore -fno-pic -mno-abicalls -G0 -c $OFF/smcstress.c -o $S/smcstress.o &&
     mipsel-buildroot-linux-musl-gcc -O2 -fno-pic -mno-abicalls -G0 -c $OFF/stubs.c -o $S/stubs.o &&
-    mipsel-buildroot-linux-musl-g++ -no-pie -Wl,--gc-sections -Wl,--wrap=gen_interupt -o $S/smcstress $S/smcstress.o $S/stubs.o $OBJS -lz -lm -lpthread 2>$S/link.err ) ||
+    mipsel-buildroot-linux-musl-g++ -no-pie -Wl,--gc-sections -o $S/smcstress $S/smcstress.o $S/stubs.o $OBJS -lz -lm -lpthread 2>$S/link.err ) ||
     { echo "build failed"; grep -v abicalls $S/link.err | head; exit 1; }
 fi
 CONFIGS=${CONFIGS:-"inline:EROSQ_PAGEPROT=0 pp: storm:EROSQ_PPSTORM=2"}

@@ -43,9 +43,13 @@ void mipsrec_rec_shutdown(void);
  * makes forward progress. Deliberately NOT rearmed's psxBranchTest()
  * (r3000a.c), which omits schedule_timeslice and would leave next_interupt
  * stale == cycle → infinite spin at boot. See compat.h Seam 2b. */
+void mipsrec_branch_test_hooked(psxCP0Regs *cp0);   /* jitsched.cpp */
 void mipsrec_branch_test(void)
 {
-	gen_interupt(&psxRegs.CP0);
+	/* = gen_interupt(), unless an offline harness armed mipsrec_irq_test_hook.
+	 * Same shape (and size) as a direct gen_interupt() tail call; the check
+	 * lives in jitsched.o, linked last, so no existing code/data moves. */
+	mipsrec_branch_test_hooked(&psxRegs.CP0);
 }
 
 static int  mipsrec_init(void)  { return mipsrec_rec_init(); }
