@@ -41,12 +41,20 @@ extern u32 cycle_multiplier;
 static u32 budget = 64;
 static unsigned long horizons, stop_after, cap = 4000000;
 static int end_reason;   /* 0 running, 1 done, 2 stopped(spin), 3 cap */
+/* HX_DMAPATCH=addr:word:horizon -- at that horizon write 'word' at guest 'addr'
+ * and psxCpu->Clear(addr, 1), as a DMA into RAM does (blkext.sh) */
+static u32 dp_addr, dp_word;
+static unsigned long dp_horizon;
 
 extern void (*mipsrec_irq_test_hook)(psxCP0Regs *cp0);
 static void test_irq(psxCP0Regs *cp0)
 {
 	(void)cp0;
 	horizons++;
+	if (dp_horizon && horizons == dp_horizon) {
+		*(u32 *)(psxRegs.ptrs.psxM + (dp_addr & 0x1fffff)) = dp_word;
+		psxCpu->Clear(dp_addr, 1);
+	}
 	u32 done = *(u32 *)(psxRegs.ptrs.psxM + (DONE & 0x1fffff));
 	if (done == DONE_MAGIC && !end_reason) { end_reason = 1; psxRegs.stop = 1; }
 	else if (stop_after && horizons >= stop_after && !end_reason) { end_reason = 2; psxRegs.stop = 1; }
@@ -72,6 +80,7 @@ int main(int argc, char **argv)
 	if (getenv("HX_BUDGET")) budget = strtoul(getenv("HX_BUDGET"), 0, 0);
 	if (getenv("HX_STOP_AFTER")) stop_after = strtoul(getenv("HX_STOP_AFTER"), 0, 0);
 	u32 cycle0 = getenv("HX_CYCLE0") ? strtoul(getenv("HX_CYCLE0"), 0, 0) : 0;
+	if (getenv("HX_DMAPATCH")) sscanf(getenv("HX_DMAPATCH"), "%x:%x:%lu", &dp_addr, &dp_word, &dp_horizon);
 
 	if (psxMemInit()) return 1;
 	mipsrec_irq_test_hook = test_irq;   /* replaces gen_interupt at every horizon */
