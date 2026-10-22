@@ -527,7 +527,10 @@ static void emitBxxZ(int andlink, u32 bpc, u32 nbpc)
 		bd_slot_writes = (u32)opcodeGetWrites(OPCODE_AT(pc)) & ~1;
 
 	u32 br1;
-	if (bd_slot_writes & (1 << _Rs_)) {
+	// EROSQ: bltzal/bgezal $ra -- the link write below would land in the
+	//  decision reg's host reg (same guest reg), so it needs a private copy
+	//  too: the compare uses rs as it was before the link (Amidog psxtest_cpu).
+	if ((bd_slot_writes | ((u32)andlink << 31)) & (1u << _Rs_)) {
 		// BD slot writes to reg read by branch: must get private copy.
 		br1 = regMipsToHost(_Rs_, REG_LOADBRANCH, REG_REGISTERBRANCH);
 	} else {
