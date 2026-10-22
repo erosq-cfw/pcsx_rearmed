@@ -615,6 +615,26 @@ static void lsu_note_guest_reg_write(u32 regpsx);
 #include "emitstat.h"
 #include "regcache.h"
 
+/* EROSQ exact AdEL/AdES (exactexc.h): in the dry-run child only, LSU_OPCODE
+ * records each emitted guest access. Kept in .jitsched_text so recompiler
+ * .text grows only by the call-site test. */
+#include "exactexc.h"
+__attribute__((noinline, section(".jitsched_text")))
+static void dry_note(u32 gpc)
+{
+	if (mipsrec_dry_nacc >= DRY_MAX_ACC)
+		return;
+	struct dry_acc *a = &mipsrec_dry_acc[mipsrec_dry_nacc++];
+	a->hoff = recMem - recMemStart;
+	a->gpc = gpc;
+	a->cmask = 0;
+	for (int r = 0; r < 32; r++) {
+		a->map[r] = regcache.psx[r].ismapped ? 0x80 | regcache.psx[r].mappedto : 0;
+		if (iRegs[r].is_const) { a->cmask |= 1u << r; a->cval[r] = iRegs[r].constval; }
+	}
+}
+#define DRY_NOTE(gpc) do { if (__builtin_expect(mipsrec_dry_on, 0)) dry_note(gpc); } while (0)
+
 static void recReset();
 static void recRecompile();
 static void recClear(u32 Addr, u32 Size);
@@ -1258,6 +1278,18 @@ static void recRecompile()
 	/* keep recRecompile at its pre-jitsched size (see the jitsched_tail note) */
 	asm volatile(".rept " JITSCHED_RECOMPILE_PAD "\n\tnop\n\t.endr");
 }
+
+/* exactexc.h: dry-run compile (child process only) */
+extern "C" __attribute__((section(".jitsched_text"))) int mipsrec_dry_run(uint32_t gpc, uint32_t *hstart)
+{
+	const u32 slot = PC_REC32(gpc);   /* recRAM is a shared mapping: restore it */
+	psxRegs.pc = gpc;
+	recMem = hstart;
+	recRecompile();
+	PC_REC32(gpc) = slot;
+	return recMem - hstart;
+}
+extern "C" __attribute__((section(".jitsched_text"))) uintptr_t mipsrec_block_ret_addr(void) { return block_ret_addr; }
 
 
 static int recInit()

@@ -457,6 +457,370 @@ static int ua_branch(mcontext_t *mc, uint32_t pc, uint32_t w, uint32_t *next)
 	return 0;
 }
 
+/* kernel-equivalent completion of the unaligned access at mc->pc (step 1);
+ * 0 = not a decodable access */
+static int ua_complete(mcontext_t *mc)
+{
+	const uint32_t pc = (uint32_t)mc->pc, w = *(const uint32_t *)(uintptr_t)pc;
+	uint32_t next;
+	if (ua_access(mc, w))
+		mc->pc = pc + 4;
+	else if (ua_branch(mc, pc, w, &next) && ua_access(mc, *(const uint32_t *)(uintptr_t)(pc + 4)))
+		mc->pc = next;   /* the access was in the branch's delay slot (EPC = branch) */
+	else
+		return 0;
+	return 1;
+}
+
+/* Exact guest AdEL/AdES (2026-10-22, step 2; exactexc.h). A guest lh/lhu/lw/
+ * sh/sw on an unaligned address faults in JIT code. The SIGBUS handler only
+ * saves the context and redirects to ee_resolve (normal context, on the
+ * interrupted stack). ee_resolve finds the block (ee_idx: host order since the
+ * last cache reset), forks, and the child dry-run recompiles it in place to
+ * learn the faulting guest instruction and the guest register file at that
+ * point (undoing the jitsched permutation: ALU words scheduled after the
+ * access but originally before it are emulated; ones hoisted above it that
+ * overwrote a live guest register force the fallback). The parent then
+ * raises the exception the interpreter would (EPC/BD/BT, BadVAddr, CE bits)
+ * and resumes at the dispatch loop with v0 = the vector, v1 = 0. Otherwise
+ * (counted: "fallback") the access completes as step 1 did. Either way the
+ * saved context comes back through a deliberate trap (ee_trap: break) whose
+ * SIGTRAP handler copies it into the ucontext, so sigreturn restores every
+ * register atomically -- no k0/k1. EROSQ_EE=0 disables (step-1 behaviour),
+ * EROSQ_EE=2 forces the fallback (tests the restore path). */
+#include <sys/mman.h>
+#include <sys/wait.h>
+#include <errno.h>
+#include "exactexc.h"
+extern "C" { int mipsrec_dry_on; struct dry_acc *mipsrec_dry_acc; int mipsrec_dry_nacc; }
+
+struct ee_blk { uint32_t host, gpc; };
+#define EE_IDX_MAX (1u << 17)              /* 1 MB reserved, demand-zero */
+static struct ee_blk *ee_idx;
+static uint32_t ee_n, ee_peak;
+static int ee_idx_bad;
+
+static void ee_index(uint32_t *host, uint32_t gpc)
+{
+	if (!ee_idx) {
+		if (ee_idx_bad)
+			return;
+		void *p = mmap(NULL, EE_IDX_MAX * sizeof *ee_idx, PROT_READ | PROT_WRITE,
+			       MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+		if (p == MAP_FAILED) { ee_idx_bad = 1; return; }
+		ee_idx = (struct ee_blk *)p;
+	}
+	if (ee_n && (uint32_t)(uintptr_t)host < ee_idx[ee_n - 1].host)
+		ee_n = 0;                          /* code cache reset */
+	if (ee_n < EE_IDX_MAX)                 /* full: later blocks fail the dry-run compare */
+		ee_idx[ee_n++] = (struct ee_blk){ (uint32_t)(uintptr_t)host, gpc };
+	if (ee_n > ee_peak)
+		ee_peak = ee_n;
+}
+
+static mcontext_t ee_ctx;
+static volatile int ee_pending;
+static int ee_mode = 1;
+static unsigned long ee_exact_n, ee_fb_n, ee_why[8], ee_emul, ee_hoist;
+extern "C" void ee_trap(void);
+asm(".pushsection .jitsched_text,\"ax\",@progbits\n"
+    ".globl ee_trap\n.type ee_trap,@function\n.set push\n.set noreorder\n"
+    "ee_trap:\n\tbreak\n\tnop\n.set pop\n.size ee_trap,8\n.popsection");
+
+/* host branch/jump (the access then sits in its delay slot) */
+static int ee_is_branch(uint32_t w)
+{
+	const int op = w >> 26;
+	return op == 0x01 || (op >= 0x02 && op <= 0x07) || (op >= 0x14 && op <= 0x17) ||
+	       (op == 0 && ((w & 63) == 0x08 || (w & 63) == 0x09)) || (op == 0x11 && ((w >> 21) & 31) == 0x08);
+}
+
+/* emulate one jitsched-movable ALU word (js_decode's set); 0 = not one */
+static int ee_alu(uint32_t *g, uint32_t *hi, uint32_t *lo, uint32_t w)
+{
+	const int op = w >> 26, rs = (w >> 21) & 31, rt = (w >> 16) & 31, rd = (w >> 11) & 31,
+		  sa = (w >> 6) & 31, fn = w & 63;
+	const uint32_t s = g[rs], t = g[rt], imm = (uint32_t)(int32_t)(int16_t)w, immu = w & 0xffff;
+	uint32_t v;
+	int dst = rd;
+	uint64_t acc;
+	switch (op) {
+	case 0x00:
+		switch (fn) {
+		case 0x00: v = t << sa; break;
+		case 0x02: v = t >> sa; break;
+		case 0x03: v = (uint32_t)((int32_t)t >> sa); break;
+		case 0x04: v = t << (s & 31); break;
+		case 0x06: v = t >> (s & 31); break;
+		case 0x07: v = (uint32_t)((int32_t)t >> (s & 31)); break;
+		case 0x0a: if (t) return 1; v = s; break;   /* movz */
+		case 0x0b: if (!t) return 1; v = s; break;  /* movn */
+		case 0x10: v = *hi; break;
+		case 0x12: v = *lo; break;
+		case 0x11: *hi = s; return 1;
+		case 0x13: *lo = s; return 1;
+		case 0x18: acc = (uint64_t)((int64_t)(int32_t)s * (int32_t)t); *lo = (uint32_t)acc; *hi = (uint32_t)(acc >> 32); return 1;
+		case 0x19: acc = (uint64_t)s * t; *lo = (uint32_t)acc; *hi = (uint32_t)(acc >> 32); return 1;
+		case 0x1a:
+			if (!t || (s == 0x80000000u && t == 0xffffffffu)) return 0;
+			*lo = (uint32_t)((int32_t)s / (int32_t)t); *hi = (uint32_t)((int32_t)s % (int32_t)t); return 1;
+		case 0x1b: if (!t) return 0; *lo = s / t; *hi = s % t; return 1;
+		case 0x21: v = s + t; break;
+		case 0x23: v = s - t; break;
+		case 0x24: v = s & t; break;
+		case 0x25: v = s | t; break;
+		case 0x26: v = s ^ t; break;
+		case 0x27: v = ~(s | t); break;
+		case 0x2a: v = (int32_t)s < (int32_t)t; break;
+		case 0x2b: v = s < t; break;
+		default: return 0;
+		}
+		break;
+	case 0x09: dst = rt; v = s + imm; break;
+	case 0x0a: dst = rt; v = (int32_t)s < (int32_t)imm; break;
+	case 0x0b: dst = rt; v = s < imm; break;
+	case 0x0c: dst = rt; v = s & immu; break;
+	case 0x0d: dst = rt; v = s | immu; break;
+	case 0x0e: dst = rt; v = s ^ immu; break;
+	case 0x0f: dst = rt; v = immu << 16; break;
+	case 0x1c:
+		acc = (uint64_t)*hi << 32 | *lo;
+		switch (fn) {
+		case 0x02: v = s * t; break;                                           /* mul */
+		case 0x00: acc += (uint64_t)((int64_t)(int32_t)s * (int32_t)t); goto setacc;   /* madd */
+		case 0x01: acc += (uint64_t)s * t; goto setacc;                        /* maddu */
+		case 0x04: acc -= (uint64_t)((int64_t)(int32_t)s * (int32_t)t); goto setacc;   /* msub */
+		case 0x05: acc -= (uint64_t)s * t; goto setacc;                        /* msubu */
+		case 0x20: v = s ? __builtin_clz(s) : 32; break;                       /* clz */
+		case 0x21: v = ~s ? __builtin_clz(~s) : 32; break;                     /* clo */
+		default: return 0;
+		}
+		break;
+	setacc:
+		*lo = (uint32_t)acc; *hi = (uint32_t)(acc >> 32); return 1;
+	case 0x1f:
+		if (fn == 0x00) {                                                      /* ext */
+			const int size = rd + 1;
+			dst = rt; v = (s >> sa) & (size >= 32 ? ~0u : (1u << size) - 1);
+		} else if (fn == 0x04) {                                               /* ins */
+			const int size = rd - sa + 1;
+			const uint32_t m = (size >= 32 ? ~0u : (1u << size) - 1) << sa;
+			dst = rt; v = (t & ~m) | ((s << sa) & m);
+		} else if (fn == 0x20 && sa == 0x10) v = (uint32_t)(int32_t)(int8_t)t;      /* seb */
+		else if (fn == 0x20 && sa == 0x18) v = (uint32_t)(int32_t)(int16_t)t;       /* seh */
+		else if (fn == 0x20 && sa == 0x02) v = ((t & 0x00ff00ffu) << 8) | ((t >> 8) & 0x00ff00ffu);   /* wsbh */
+		else return 0;
+		break;
+	default:
+		return 0;
+	}
+	if (dst)
+		g[dst] = v;
+	return 1;
+}
+
+struct ee_res { int ok; uint32_t gpc, gpr[32], nemul, nhoist; };
+static uint32_t ee_live[DRY_MAX_WORDS];    /* BSS, touched only in the child */
+static uint16_t ee_perm[DRY_MAX_WORDS];
+static struct dry_acc ee_acc[DRY_MAX_ACC];
+
+/* child: dry-run the block at hs (guest gpc0), fault at scheduled word F */
+static void ee_child(uint32_t *hs, uint32_t gpc0, uint32_t F, int fd)
+{
+	struct ee_res r;
+	memset(&r, 0, sizeof r);
+	uint32_t avail = (uint32_t)((ua_jhi - (uintptr_t)hs) / 4), uF, i, n;
+	const struct dry_acc *a = NULL;
+	if (avail > DRY_MAX_WORDS)
+		avail = DRY_MAX_WORDS;
+	memcpy(ee_live, hs, avail * 4);
+	mipsrec_dry_acc = ee_acc;
+	mipsrec_dry_nacc = 0;
+	js_perm = ee_perm;
+	mipsrec_dry_on = 1;
+	n = (uint32_t)mipsrec_dry_run(gpc0, hs);
+	mipsrec_dry_on = 0;
+	if (n > avail || F >= n || memcmp(hs, ee_live, n * 4) || !js_perm) { r.ok = -1; goto out; }
+	uF = ee_perm[F];
+	for (int k = 0; k < mipsrec_dry_nacc; k++)
+		if (ee_acc[k].hoff == uF) { a = &ee_acc[k]; break; }
+	if (!a) { r.ok = -2; goto out; }
+	{
+		uint32_t g[32], hi = (uint32_t)ee_ctx.mdhi, lo = (uint32_t)ee_ctx.mdlo;
+		for (i = 0; i < 32; i++) g[i] = (uint32_t)ee_ctx.gregs[i];
+		g[0] = 0;
+		/* original order: words scheduled after the access but originally
+		 * before it have not run yet -- run them (ascending original index) */
+		for (uint32_t want = 0; want < uF; want++)
+			for (i = F + 1; i < n; i++)
+				if (ee_perm[i] == want) {
+					if (!ee_alu(g, &hi, &lo, ee_live[i])) { r.ok = -3; goto out; }
+					r.nemul++;
+					break;
+				}
+		/* words hoisted above it already ran: fatal if one overwrote a live guest reg */
+		for (i = 0; i < F; i++)
+			if (ee_perm[i] > uF) {
+				struct js_ins d;
+				if (js_decode(ee_live[i], &d) == JS_BAR) { r.ok = -4; goto out; }
+				r.nhoist++;
+				for (int gr = 1; gr < 32; gr++)
+					if (!(a->cmask >> gr & 1) && (a->map[gr] & 0x80) && (d.dst >> (a->map[gr] & 31) & 1)) {
+						r.ok = -4; goto out;
+					}
+			}
+		for (int gr = 1; gr < 32; gr++)
+			r.gpr[gr] = (a->cmask >> gr & 1) ? a->cval[gr] :
+				    (a->map[gr] & 0x80) ? g[a->map[gr] & 31] : psxRegs.GPR.r[gr];
+		r.gpc = a->gpc;
+		r.ok = 1;
+	}
+out:
+	{ ssize_t w = write(fd, &r, sizeof r); (void)w; }
+}
+
+/* guest branch at bpc (word w) taken, given the guest registers */
+static int ee_taken(uint32_t w, const uint32_t *gpr)
+{
+	const int op = w >> 26;
+	const int32_t s = (int32_t)gpr[(w >> 21) & 31], t = (int32_t)gpr[(w >> 16) & 31];
+	switch (op) {
+	case 0x01: return ((w >> 16) & 1) ? s >= 0 : s < 0;
+	case 0x04: return s == t;
+	case 0x05: return s != t;
+	case 0x06: return s <= 0;
+	case 0x07: return s > 0;
+	}
+	return 1;   /* j jal jr jalr */
+}
+
+static int ee_guest_branch(uint32_t w)
+{
+	const int op = w >> 26;
+	return (op >= 0x01 && op <= 0x07) || (op == 0 && ((w & 63) == 0x08 || (w & 63) == 0x09));
+}
+
+static int ee_exact(void)
+{
+	const uintptr_t loop = mipsrec_block_ret_addr();
+	const uint32_t pc = (uint32_t)ee_ctx.pc;
+	if (!loop || !ee_idx || !ee_n) return 0;
+	uint32_t lo = 0, hi = ee_n;                /* last block starting <= pc */
+	while (hi - lo > 1) {
+		const uint32_t mid = (lo + hi) / 2;
+		if (ee_idx[mid].host <= pc) lo = mid; else hi = mid;
+	}
+	if (ee_idx[lo].host > pc) return 0;
+	uint32_t *const hs = (uint32_t *)(uintptr_t)ee_idx[lo].host;
+	const uint32_t gpc0 = ee_idx[lo].gpc;
+	uint32_t F = (pc - ee_idx[lo].host) / 4, w = *(const uint32_t *)(uintptr_t)pc;
+	if (ee_is_branch(w)) { F++; w = *(const uint32_t *)(uintptr_t)(pc + 4); }
+	const int hop = w >> 26;
+	if (hop != 0x21 && hop != 0x25 && hop != 0x23 && hop != 0x29 && hop != 0x2b) return 0;
+	if (F >= DRY_MAX_WORDS) return 0;
+
+	int fd[2];
+	if (pipe(fd)) return 0;
+	const pid_t pid = fork();
+	if (pid == 0) {
+		close(fd[0]);
+		ee_child(hs, gpc0, F, fd[1]);
+		_exit(0);
+	}
+	close(fd[1]);
+	struct ee_res r;
+	size_t got = 0;
+	while (pid > 0 && got < sizeof r) {
+		const ssize_t k = read(fd[0], (char *)&r + got, sizeof r - got);
+		if (k > 0) got += k;
+		else if (k == 0 || errno != EINTR) break;
+	}
+	close(fd[0]);
+	if (pid > 0)
+		while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {}
+	if (got != sizeof r || r.ok != 1) {
+		ee_why[got != sizeof r ? 0 : (-r.ok) & 7]++;
+		return 0;
+	}
+
+	ee_emul += r.nemul;
+	ee_hoist += r.nhoist;
+	/* the guest instruction and its address */
+	const uint32_t *gp = is_ptr(r.gpc), *pp = r.gpc != gpc0 ? is_ptr(r.gpc - 4) : NULL;
+	if (!gp) { ee_why[5]++; return 0; }
+	const uint32_t gw = *gp, op = gw >> 26, rs = (gw >> 21) & 31;
+	const uint32_t addr = r.gpr[rs] + (uint32_t)(int32_t)(int16_t)gw;
+	if (!(addr & ((op == 0x23 || op == 0x2b) ? 3 : 1)) || op != (uint32_t)hop) { ee_why[6]++; return 0; }
+	const int bd = pp && ee_guest_branch(*pp);
+
+	for (int k = 1; k < 32; k++)
+		psxRegs.GPR.r[k] = r.gpr[k];
+	/* earlier stores of the same series ran but their SMC check comes after
+	 * the series: clear for them as the block would have */
+	for (uint32_t k = r.gpc - 4; k >= gpc0 && k < r.gpc; k -= 4) {
+		const uint32_t *kp = is_ptr(k);
+		if (!kp) break;
+		const uint32_t kw = *kp, ko = kw >> 26;
+		if (!kw) continue;
+		if (ko < 0x20 || ko > 0x2e) break;
+		if (ko < 0x28 && ((kw >> 16) & 31) == rs) break;   /* load rewrote the base */
+		if (ko >= 0x28 && ((kw >> 21) & 31) == rs)
+			psxCpu->Clear((r.gpr[rs] + (uint32_t)(int32_t)(int16_t)kw) & ~3u, 1);
+	}
+	psxRegs.cycle += is_clk((r.gpc - gpc0) / 4 + 1);
+	psxRegs.CP0.n.BadVAddr = addr;
+	psxRegs.pc = r.gpc;
+	const enum R3000Abdt bdt = !bd ? R3000A_BRANCH_NONE_OR_EXCEPTION :
+		ee_taken(*pp, r.gpr) ? R3000A_BRANCH_TAKEN : R3000A_BRANCH_NOT_TAKEN;
+	psxException(((op >= 0x28 ? R3000E_AdES : R3000E_AdEL) << 2) | ((gw & 0x0c000000) << 2), bdt, &psxRegs.CP0);
+	ee_ctx.pc = loop;
+	ee_ctx.gregs[2] = (greg_t)(int32_t)psxRegs.pc;   /* v0 = next pc */
+	ee_ctx.gregs[3] = 0;                             /* v1 = cycles (charged above) */
+	return 1;
+}
+
+extern "C" void __attribute__((noreturn, used)) ee_resolve(void)
+{
+	if (ee_mode == 1 && ee_exact())
+		ee_exact_n++;
+	else {
+		ee_fb_n++;
+		if (!ua_complete(&ee_ctx)) {
+			fprintf(stderr, "mipsrec: undecodable unaligned JIT access at %08x\n", (uint32_t)ee_ctx.pc);
+			abort();
+		}
+	}
+	ee_trap();
+	__builtin_unreachable();
+}
+
+static struct sigaction ee_prev_trap;
+static void ee_sigtrap(int sig, siginfo_t *si, void *ucv)
+{
+	ucontext_t *uc = (ucontext_t *)ucv;
+	if (ee_pending && (uintptr_t)uc->uc_mcontext.pc == (uintptr_t)ee_trap) {
+		uc->uc_mcontext = ee_ctx;
+		ee_pending = 0;
+		return;
+	}
+	if ((ee_prev_trap.sa_flags & SA_SIGINFO) && ee_prev_trap.sa_sigaction) { ee_prev_trap.sa_sigaction(sig, si, ucv); return; }
+	if (ee_prev_trap.sa_handler == SIG_IGN) return;
+	signal(SIGTRAP, SIG_DFL);
+}
+
+/* SIGBUS in JIT code: save the context, run ee_resolve below the interrupted sp */
+static int ee_redirect(mcontext_t *mc)
+{
+	if (!ee_mode || ee_pending)
+		return 0;
+	ee_ctx = *mc;
+	ee_pending = 1;
+	mc->pc = (uintptr_t)ee_resolve;
+	mc->gregs[25] = (greg_t)(uintptr_t)ee_resolve;
+	mc->gregs[29] = (mc->gregs[29] - 64) & ~(greg_t)7;
+	return 1;
+}
+
 static void ua_sigbus(int sig, siginfo_t *si, void *ucv)
 {
 	ucontext_t *uc = (ucontext_t *)ucv;
@@ -464,21 +828,21 @@ static void ua_sigbus(int sig, siginfo_t *si, void *ucv)
 	const uint32_t pc = (uint32_t)mc->pc;
 	if (pc && !(pc & 3)) {
 		const uint32_t w = *(const uint32_t *)(uintptr_t)pc;
-		uint32_t next;
 		const uint32_t v0 = (uint32_t)mc->gregs[2], t2 = (uint32_t)mc->gregs[10];
 		if (w == 0x8d480000 && (v0 & 3) && (uint32_t)(uintptr_t)si->si_addr == t2 &&   /* dispatch slot load, */
 		    (t2 & 3) == (v0 & 3) && !(pc >= ua_jlo && pc < ua_jhi) &&                    /* misaligned guest pc */
 		    cio_redirect(uc, pc))
 			return;   /* the stub raises AdEL (mipsrec_cio_run) */
-		if (ua_access(mc, w)) {
-			mc->pc = pc + 4;
-		} else if (ua_branch(mc, pc, w, &next) && ua_access(mc, *(const uint32_t *)(uintptr_t)(pc + 4))) {
-			mc->pc = next;   /* the access was in the branch's delay slot (EPC = branch) */
-		} else {
+		if (pc >= ua_jlo && pc < ua_jhi) {
+			ua_jit++;
+			if (ee_redirect(mc))
+				return;   /* ee_resolve raises AdEL/AdES or completes it */
+		}
+		if (!ua_complete(mc)) {
 			ua_bad++;
 			goto chain;
 		}
-		if (pc >= ua_jlo && pc < ua_jhi) ua_jit++; else ua_host++;
+		if (!(pc >= ua_jlo && pc < ua_jhi)) ua_host++;
 		return;
 	}
 chain:
@@ -490,7 +854,11 @@ chain:
 static void ua_report(void)
 {
 	fprintf(stderr, "unaligned: host %lu jit %lu undecoded %lu\n", ua_host, ua_jit, ua_bad);
+	fprintf(stderr, "unaligned: exact %lu fallback %lu index-peak %u blocks; emulated %lu hoisted %lu (why io %lu cmp %lu acc %lu alu %lu hoist %lu bios %lu chk %lu)\n",
+		ee_exact_n, ee_fb_n, ee_peak, ee_emul, ee_hoist, ee_why[0], ee_why[1], ee_why[2], ee_why[3], ee_why[4], ee_why[5], ee_why[6]);
 }
+
+extern "C" void mipsrec_ua_report(void) { ua_report(); }   /* offline harness */
 
 static void ua_install(void)
 {
@@ -501,6 +869,12 @@ static void ua_install(void)
 	sa.sa_flags = SA_SIGINFO;
 	sigemptyset(&sa.sa_mask);
 	sigaction(SIGBUS, &sa, &ua_prev);
+	{
+		const char *e = getenv("EROSQ_EE");
+		ee_mode = e ? atoi(e) : 1;
+		sa.sa_sigaction = ee_sigtrap;
+		sigaction(SIGTRAP, &sa, &ee_prev_trap);
+	}
 	syscall(__NR_sysmips, 7 /* MIPS_FIXADE */, 0, 0);   /* this (emu) thread only; ENOSYS under qemu-user (SIGBUS there anyway) */
 	if (getenv("EROSQ_PROF"))
 		atexit(ua_report);
@@ -595,6 +969,7 @@ static void bx_block(uint32_t *host, uint32_t guest)
 		bx_reset_all();
 	bx_last_host = (uintptr_t)host;
 	const uint32_t pc = psxRegs.pc;
+	ee_index(host, pc);
 	if ((pc & 0x1fffffff) >= 0x800000 || !guest || guest > 0x10000)   /* RAM (+mirrors) only */
 		return;
 	const uint32_t s = pc & 0x1ffffc, e = s + guest * 4;
@@ -674,6 +1049,13 @@ int jitsched_tail(uint32_t *start, uint32_t *end, int es, unsigned long long *es
 			is_blocks[cur_idle]++;
 	}
 	cur_idle = cur_words = 0;
+	if (js_perm) {   /* exact-exception dry run (child): identity, then the permutation */
+		if (end - start > DRY_MAX_WORDS)
+			js_perm = NULL;
+		else
+			for (uint32_t i = 0; i < (uint32_t)(end - start); i++) js_perm[i] = (uint16_t)i;
+		js_perm_base = start;
+	}
 	if (jitsched_on > 0) {
 		const int c = jitsched_block(start, end);
 		js_blocks++;

@@ -262,6 +262,12 @@ static unsigned js_cost(const struct js_ins *ins, const uint8_t *ord, int n, js_
 
 /* schedule one region of n (<= JS_MAXR) already-decoded words in place;
  * returns 1 if changed */
+/* Optional (exact-exception dry runs only, jitsched.cpp): when js_perm is set,
+ * a reordered region records js_perm[i] = original word index (from
+ * js_perm_base) of the word now at index i. The caller fills the identity. */
+static uint16_t *js_perm;
+static const uint32_t *js_perm_base;
+
 static int js_region(uint32_t *w, const struct js_ins *ins, int n, js_m sink)
 {
 	js_m pred[JS_MAXR];
@@ -316,6 +322,10 @@ static int js_region(uint32_t *w, const struct js_ins *ins, int n, js_m sink)
 	uint32_t tmp[JS_MAXR];
 	for (int k = 0; k < n; k++) tmp[k] = w[ord[k]];
 	memcpy(w, tmp, n * sizeof *w);
+	if (js_perm) {
+		const int b = (int)(w - js_perm_base);
+		for (int k = 0; k < n; k++) js_perm[b + k] = (uint16_t)(b + ord[k]);
+	}
 	return 1;
 }
 

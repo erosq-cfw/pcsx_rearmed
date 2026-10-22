@@ -42,6 +42,7 @@ void mipsrec_emitstat_dump(void) __attribute__((weak));
 void mipsrec_rec_reset(void) __attribute__((weak));
 void mipsrec_debug_regions(uintptr_t *v) __attribute__((weak));
 void mipsrec_idleskip_report(void) __attribute__((weak));
+void mipsrec_ua_report(void) __attribute__((weak));
 
 int g_prof_on;
 unsigned long long g_prof_gpu_ns, g_prof_present_ns, g_prof_spu_ns;
@@ -415,6 +416,7 @@ static void cyc_hook(psxCP0Regs *cp0)
 		if (vf) { fwrite(gpu.vram, 2, 1024 * 512, vf); fclose(vf); }
 	}
 	if (mipsrec_idleskip_report) mipsrec_idleskip_report();
+	if (mipsrec_ua_report) mipsrec_ua_report();
 	fprintf(stderr, "[hx] done after %llu cycles (%lu frames)\n", cyc_used, frames);
 	fflush(NULL);
 	_exit(0);
@@ -508,6 +510,7 @@ void *plat_gvideo_flip(void)
 				if (vf) { fwrite(gpu.vram, 2, 1024 * 512, vf); fclose(vf); }
 			}
 			if (mipsrec_idleskip_report) mipsrec_idleskip_report();
+			if (mipsrec_ua_report) mipsrec_ua_report();
 		}
 		fprintf(stderr, "[hx] done after %lu frames\n", frames);
 		fflush(NULL);

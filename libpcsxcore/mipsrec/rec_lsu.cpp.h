@@ -96,7 +96,9 @@
 #define USE_LSU_CACHING
 
 
+/* every caller has the local PC one past the access (DRY_NOTE: exactexc.h) */
 #define LSU_OPCODE(insn, rt, rn, imm) \
+	DRY_NOTE(PC - 4); \
 	write32((insn) | ((rn) << 21) | ((rt) << 16) | ((imm) & 0xffff))
 
 //#define LOG_LOAD_STORE_SERIES
