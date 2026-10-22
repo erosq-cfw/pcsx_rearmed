@@ -299,7 +299,7 @@ static int ldhaz_block(uint32_t pc)
 {
 	if (ldhaz_mode < 0) {
 		const char *e = getenv("EROSQ_LDHAZ");
-		ldhaz_mode = e ? atoi(e) : 1;
+		ldhaz_mode = e ? atoi(e) : 0;   /* opt-in until the JIT-level fix (2026-10-22) */
 		ldhaz_log = getenv("EROSQ_LDHAZ_LOG") != NULL;
 	}
 	return ldhaz_mode && ldhaz_scan(pc);
