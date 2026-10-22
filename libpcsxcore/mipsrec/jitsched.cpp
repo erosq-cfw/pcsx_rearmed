@@ -690,6 +690,7 @@ static volatile int ee_pending;
 static int ee_mode = 1;
 extern "C" { unsigned long mipsrec_ovf_sites; }
 static unsigned long ee_exact_n, ee_ovf_n, ee_fb_n, ee_why[8], ee_emul, ee_hoist;
+static int ee_prof;   /* EROSQ_PROF: running counts from ee_resolve */
 extern "C" void ee_trap(void);
 asm(".pushsection .jitsched_text,\"ax\",@progbits\n"
     ".globl ee_trap\n.type ee_trap,@function\n.set push\n.set noreorder\n"
@@ -972,6 +973,10 @@ extern "C" void __attribute__((noreturn, used)) ee_resolve(void)
 			abort();
 		}
 	}
+	/* EROSQ_PROF: a running count from normal context (the exit summary is an
+	 * atexit handler, which a SIGINT exit (_exit) skips): 1st event, then every 64 */
+	if (ee_prof && ((ee_exact_n + ee_fb_n) & 63) == 1)
+		fprintf(stderr, "unaligned: running exact %lu fallback %lu overflow %lu\n", ee_exact_n, ee_fb_n, ee_ovf_n);
 	ee_trap();
 	__builtin_unreachable();
 }
@@ -1095,8 +1100,10 @@ static void ua_install(void)
 		sigaction(SIGFPE, &sa, &ee_prev_fpe);
 	}
 	syscall(__NR_sysmips, 7 /* MIPS_FIXADE */, 0, 0);   /* this (emu) thread only; ENOSYS under qemu-user (SIGBUS there anyway) */
-	if (getenv("EROSQ_PROF"))
+	if (getenv("EROSQ_PROF")) {
+		ee_prof = 1;
 		atexit(ua_report);
+	}
 }
 
 extern "C" void mipsrec_unaligned_stats(unsigned long *host, unsigned long *jit, unsigned long *bad) { *host = ua_host; *jit = ua_jit; *bad = ua_bad; }
