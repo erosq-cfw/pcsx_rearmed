@@ -1033,7 +1033,9 @@ static void ua_sigbus(int sig, siginfo_t *si, void *ucv)
 	if (pc && !(pc & 3)) {
 		const uint32_t w = *(const uint32_t *)(uintptr_t)pc;
 		const uint32_t v0 = (uint32_t)mc->gregs[2], t2 = (uint32_t)mc->gregs[10];
-		if (w == 0x8d480000 && (v0 & 3) && (uint32_t)(uintptr_t)si->si_addr == t2 &&   /* dispatch slot load, */
+		/* no si_addr test: the device kernel's address-error SIGBUS carries
+		 * si_addr = 0 (qemu fills it in); t2 is the faulting address here */
+		if (w == 0x8d480000 && (v0 & 3) &&                                            /* dispatch slot load, */
 		    (t2 & 3) == (v0 & 3) && !(pc >= ua_jlo && pc < ua_jhi) &&                    /* misaligned guest pc */
 		    cio_redirect(uc, pc))
 			return;   /* the stub raises AdEL (mipsrec_cio_run) */
