@@ -314,6 +314,11 @@ static int iLoadTest(u32 code)
 static int DelayTest(const u32 pc, const u32 bpc)
 {
 	const u32 code1 = OPCODE_AT(pc);
+	/* the target can be unmapped (a constant jalr/jal into garbage, e.g.
+	 * psxtest_cpu on the device): peek it only when mapped. Unmapped = no
+	 * load-delay interaction; the jump itself then faults at run time. */
+	if (PSXM(bpc) == INVALID_PTR)
+		return 0;
 	const u32 code2 = OPCODE_AT(bpc);
 	const u32 reg = _fRt_(code1);
 
@@ -900,7 +905,9 @@ extern void (*psxBSC[64])(void);
 static u32 execBranchLoadDelay(u32 pc, u32 bpc)
 {
 	const u32 code1 = OPCODE_AT(pc);
-	const u32 code2 = OPCODE_AT(bpc);
+	/* run time: jr to an unmapped target reads it as a nop (no load-delay
+	 * interaction); the dispatcher then faults on the target itself */
+	const u32 code2 = PSXM(bpc) != INVALID_PTR ? OPCODE_AT(bpc) : 0;
 
 	branch = 1;
 

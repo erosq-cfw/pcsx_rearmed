@@ -4,6 +4,7 @@
 # S= below is the scratch dir holding the corpus and build products; adjust.
 #!/bin/bash
 # hexec.sh N_SEEDS [FAULTMEM(1/0)] : generate + assemble + run N random tests
+# SRC=<repo-relative .S>: run that fixed program instead (e.g. unmapped_target.S)
 S=${S:-/tmp/es}
 W=${W:-$(cd "$(dirname "$0")/../../.." && pwd)}
 export PATH=buildroot-2026.08/output/host/bin:$PATH
@@ -13,7 +14,7 @@ mipsel-buildroot-linux-musl-gcc -O2 -DNO_PNG -Iinclude -Ilibpcsxcore -fno-pic -m
 mipsel-buildroot-linux-musl-g++ -no-pie -Wl,--gc-sections -o $S/hexec $S/hexec.o $S/stubs.o $OBJS -lz -lm -lpthread 2>/dev/null || exit 1
 cd $S; mkdir -p hx; pass=0; fail=0
 for i in $(seq 1 $1); do
-  python3 gen_lsu.py $i ${NOPS:-60} ${LOOPS:-3} > hx/t.S
+  if [ -n "$SRC" ]; then cp $W/$SRC hx/t.S; else python3 gen_lsu.py $i ${NOPS:-60} ${LOOPS:-3} > hx/t.S; fi
   mipsel-buildroot-linux-musl-gcc -mips1 -msoft-float -mno-abicalls -fno-pic -G0 -c hx/t.S -o hx/t.o 2>hx/as.err || { echo "asm fail $i"; continue; }
   mipsel-buildroot-linux-musl-ld -Ttext=0x80010000 -e test -o hx/t.elf hx/t.o && mipsel-buildroot-linux-musl-objcopy -O binary -j .text hx/t.elf hx/t.bin
   out=$(EROSQ_FAULTMEM=${2:-1} timeout 60 qemu-mipsel-static -L buildroot-2026.08/output/host/mipsel-buildroot-linux-musl/sysroot ./hexec hx/t.bin $i 2>&1 | grep -v "^mipsrec\|^WARNING")
