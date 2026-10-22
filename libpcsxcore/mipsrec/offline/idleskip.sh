@@ -122,6 +122,91 @@ T:
 EOF
 prog $1
 }
+# P (round 2, EROSQ_IDLESKIP2): CTR frame-pacing wait. gp = DATA, gp+0x40 -> struct
+# at DATA+0x100: count +0x80 (<7 loops), busy byte +0x90, countdown gp+0x48
+p_prog() {   # p_prog NAME BUSY COUNTDOWN
+cat > $S/$1.S <<EOF
+.set noreorder
+.set noat
+.globl start
+start:
+  lui \$28,0x8003
+  ori \$28,\$28,0x1000
+  lui \$9,0x8003
+  ori \$9,\$9,0x1100
+  sw \$9,0x40(\$28)
+  sw \$0,0x80(\$9)
+  sw \$0,0x90(\$9)
+  li \$8,$2
+  sb \$8,0x90(\$9)
+  li \$8,$3
+  sw \$8,0x48(\$28)
+L:
+  lw \$3,0x40(\$28)
+  nop
+  lw \$2,0x80(\$3)
+  nop
+  sltiu \$2,\$2,7
+  beqz \$2,TO
+  nop
+  lbu \$2,0x90(\$3)
+  nop
+  bnez \$2,L
+  nop
+  lw \$2,0x48(\$28)
+  nop
+  bgtz \$2,L
+  nop
+  $DONE_ASM
+TO:
+  addiu \$7,\$0,0x77
+  $DONE_ASM
+EOF
+prog $1
+}
+
+# R (round 2): Tekken 3 RNG wait. y at DATA+0x200 (s0), flag DATA+0x204 (s1), x at DATA+0x208 (T)
+cat > $S/r.S <<EOF
+.set noreorder
+.set noat
+.globl start
+start:
+  lui \$16,0x8003
+  lui \$17,0x8003
+  sw \$0,0x1204(\$17)
+L:
+  jal T
+  nop
+  lw \$3,0x1200(\$16)
+  lw \$4,0x1204(\$17)
+  addiu \$3,\$3,1
+  sll \$2,\$3,5
+  addu \$2,\$2,\$3
+  sll \$2,\$2,2
+  subu \$2,\$2,\$3
+  sll \$2,\$2,2
+  subu \$2,\$2,\$3
+  sll \$2,\$2,2
+  addu \$2,\$2,\$3
+  sll \$3,\$2,5
+  addu \$2,\$2,\$3
+  beqz \$4,L
+  sw \$2,0x1200(\$16)
+  $DONE_ASM
+T:
+  lui \$4,0x8003
+  lw \$3,0x1208(\$4)
+  nop
+  sll \$2,\$3,2
+  addu \$2,\$2,\$3
+  addiu \$2,\$2,1
+  jr \$31
+  sw \$2,0x1208(\$4)
+EOF
+prog r
+p_prog p-busy 1 0
+p_prog p-cd 0 1
+
 v_prog v-timeout 20000
 v_prog v-vcount 0x7fffffff
 v_prog v-ape 20000 4
@@ -130,10 +215,13 @@ i_prog i-nomatch 0
 
 # guest words the shapes must assemble to (else the cases test nothing)
 chk() { mipsel-buildroot-linux-musl-objdump -d $S/$1.elf | grep -q "$2" || { echo "FAIL $1: shape word $2 missing"; exit 1; }; }
+chk p-busy 1440fff6; chk p-busy 1c40fff2; chk p-busy 2c420007; chk r 1080fff0; chk r 00021940; chk r 24420001
 chk v-timeout 1443000c; chk v-timeout 1440ffe8; chk v-ape 1443000b; chk v-ape 1440ffe9; chk a 1440fffc; chk i-patch 0600fff7; chk i-patch 2402ffff; chk i-patch 00408021
 
 T_ADDR=$(mipsel-buildroot-linux-musl-nm $S/i-patch.elf | awk '$3=="T"{print $1}')
 T4=$(printf %x $((0x$T_ADDR + 4)))
+RT=$(mipsel-buildroot-linux-musl-nm $S/r.elf | awk '$3=="T"{print $1}')
+RT20=$(printf %x $((0x$RT + 20)))   # T's addiu v0,v0,1
 
 pass=0; fail=0
 run() {   # run CASE BIN EXPECT [ENV...]   EXPECT: skips | smc | none
@@ -142,7 +230,7 @@ run() {   # run CASE BIN EXPECT [ENV...]   EXPECT: skips | smc | none
     local env="HX_BUDGET=50000 HX_STOP_AFTER=${STOP:-400} EROSQ_JITSCHED=$js EROSQ_BLOCKLINK=$bl $*"
     local o=$(env $env EROSQ_IDLESKIP=0 timeout 120 $QEMU $S/hlink $S/$b.bin 2>/dev/null | grep '^STATE')
     local n=$(env $env EROSQ_IDLESKIP=1 timeout 120 $QEMU $S/hlink $S/$b.bin 2>$S/$c.err | grep '^STATE')
-    local sk=$(awk '/idleskip [VIA]:/{s+=$8} END{print s+0}' $S/$c.err)
+    local sk=$(awk '/idleskip [VIAPR]:/{s+=$8} END{print s+0}' $S/$c.err)
     local nm=$(awk '/nomatch-calls/{print $3}' $S/$c.err)
     local ok=1
     [ -n "$o" ] && [ "$o" = "$n" ] || ok=0
@@ -158,4 +246,11 @@ run a-patch   a         skips   HX_DMAPATCH=80031004:7fffffff:3
 run i-patch   i-patch   skips   HX_DMAPATCH=$T4:24020000:3
 STOP=20 run i-smc i-patch smc   HX_DMAPATCH=$T4:2402fffe:3
 run i-nomatch i-nomatch none
+# round 2 (the IDLESKIP=0 arm turns round 2 off with it)
+run p-busy    p-busy    skips   EROSQ_IDLESKIP2=1 HX_DMAPATCH=80031190:00000000:3
+run p-cd      p-cd      skips   EROSQ_IDLESKIP2=1 HX_DMAPATCH=80031048:00000000:3
+run p-timeout p-busy    skips   EROSQ_IDLESKIP2=1 HX_DMAPATCH=80031180:00000007:3
+run r-flag    r         skips   EROSQ_IDLESKIP2=1 HX_DMAPATCH=80031204:00000001:3
+STOP=20 run r-smc r     smc     EROSQ_IDLESKIP2=1 HX_DMAPATCH=$RT20:24420002:3
+run r-off     r         none    EROSQ_IDLESKIP2=0 HX_DMAPATCH=80031204:00000001:3
 echo "idleskip: pass=$pass fail=$fail"
