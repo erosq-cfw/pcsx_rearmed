@@ -168,16 +168,9 @@ u64 opcodeGetReads(const u32 op)
 					return BIT(_fRs_(op)) | BIT(_fRt_(op));
 			}
 			break;
-		case 0x1: /* REGIMM prefix */
-			switch (_fRt_(op))
-			{
-				case 0x0: /* REGIMM opcode 0x0: BLTZ */
-				case 0x1: /* REGIMM opcode 0x1: BGEZ */
-				case 0x10: /* REGIMM opcode 0x10: BLTZAL */
-				case 0x11: /* REGIMM opcode 0x11: BGEZAL */
-					return BIT(_fRs_(op));
-			}
-			break;
+		case 0x1: /* REGIMM prefix: every rt decodes (394450a: rt values other
+			   than 0/1/0x10/0x11 are BLTZ/BGEZ by rt bit 0, no link) */
+			return BIT(_fRs_(op));
 		case 0x2: /* Major opcode 0x2: J */
 		case 0x3: /* Major opcode 0x3: JAL */
 			return 0;
@@ -304,17 +297,8 @@ u64 opcodeGetWrites(const u32 op)
 					return BIT(_fRd_(op)) & ~BIT(0);
 			}
 			break;
-		case 0x1: /* REGIMM prefix */
-			switch (_fRt_(op))
-			{
-				case 0x0: /* REGIMM opcode 0x0: BLTZ */
-				case 0x1: /* REGIMM opcode 0x1: BGEZ */
-					return 0;
-				case 0x10: /* REGIMM opcode 0x10: BLTZAL */
-				case 0x11: /* REGIMM opcode 0x11: BGEZAL */
-					return BIT(31);
-			}
-			break;
+		case 0x1: /* REGIMM prefix: only BLTZAL/BGEZAL (rt 0x10/0x11) link */
+			return (_fRt_(op) == 0x10 || _fRt_(op) == 0x11) ? BIT(31) : 0;
 		case 0x2: /* Major opcode 0x2: J */
 			return 0;
 		case 0x3: /* Major opcode 0x3: JAL */
