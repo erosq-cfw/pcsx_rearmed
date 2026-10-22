@@ -43,9 +43,21 @@ static unsigned long js_blocks, js_changed, js_regions;
  * runs the iteration that reaches the event, unmodified. V also caps m at
  * its timeout counter, so the real iteration takes the timeout path exactly
  * when the plain run would. */
-enum { IS_NONE, IS_V, IS_I, IS_A, IS_N };
+/* EROSQ_IDLESKIP2 (2026-10-22, round 2; default off): game/library loops
+ * the round-1 shapes miss (idlesurvey: CTR 15.7%, Tekken 3 15-18% of emulated
+ * cycles). Same mechanism and exactness argument:
+ *   P  CTR frame-pacing wait: lw v1,X(gp); lw v0,Y(v1); sltiu v0,K; beqz
+ *      v0,timeout; lbu v0,Z(v1); bnez v0,L; lw v0,W(gp); bgtz v0,L -- loads
+ *      only (the flags change in IRQ callbacks); the path taken (busy byte or
+ *      countdown) fixes the charge: 11 or 15 words.
+ *   R  Tekken 3 title/fight wait: jal T (T: x = 5x+1 at a RAM word);
+ *      y = 69069*(y+1) at another; loop while a vsync-flag word is 0. The m
+ *      skipped iterations' net effect is both LCGs jumped m steps ahead
+ *      (closed form), written back; every register the loop reads is
+ *      rewritten before the read in the real iteration that follows. */
+enum { IS_NONE, IS_V, IS_I, IS_A, IS_P, IS_R, IS_N };
 static void jitsched_init(void);
-static int idleskip_on, idleskip_stat;
+static int idleskip_on, idleskip_stat, idleskip2_on;
 static int cur_words, cur_idle;   /* entry room of the block being compiled */
 static uint32_t cur_pc;
 static unsigned long is_blocks[IS_N], is_calls[IS_N], is_skips[IS_N], is_nomatch;
@@ -110,7 +122,46 @@ static int idle_match(uint32_t pc, uint32_t *aux)
 			return IS_I;
 		}
 	}
+	if (idleskip2_on <= 0)
+		return IS_NONE;
+	/* P: offsets kept in aux (X, Y, K, Z, W) -- checked per call */
+	if ((w[0] & 0xffff0000) == 0x8f830000 && w[1] == 0 && (w[2] & 0xffff0000) == 0x8c620000 && w[3] == 0 &&
+	    (w[4] & 0xffff0000) == 0x2c420000 && (w[5] & 0xffff0000) == 0x10400000 && w[6] == 0 &&
+	    (w[7] & 0xffff0000) == 0x90620000 && w[8] == 0 && w[9] == 0x1440fff6 && w[10] == 0 &&
+	    (w[11] & 0xffff0000) == 0x8f820000 && w[12] == 0 && w[13] == 0x1c40fff2 && w[14] == 0)
+		return IS_P;
+	/* R: jal T; nop; lw v1,P(s0); lw a0,Q(s1); addiu v1,1; v0 = 69069*v1 by
+	 * shifts; beqz a0,L; sw v0,P(s0) <BD> -- T = lui a0,H; lw v1,Y(a0); nop;
+	 * v0 = 5*v1 + 1; jr ra; sw v0,Y(a0) <BD> */
+	static const uint32_t rmul[10] = { 0x00031140, 0x00431021, 0x00021080, 0x00431023, 0x00021080,
+					   0x00431023, 0x00021080, 0x00431021, 0x00021940, 0x00431021 };
+	if ((w[0] >> 26) == 0x03 && w[1] == 0 && (w[2] & 0xffff0000) == 0x8e030000 &&
+	    (w[3] & 0xffff0000) == 0x8e240000 && w[4] == 0x24630001 && w[15] == 0x1080fff0 &&
+	    w[16] == (0xae020000 | (w[2] & 0xffff)) && !memcmp(w + 5, rmul, sizeof rmul)) {
+		const uint32_t t = ((pc + 4) & 0xf0000000) | ((w[0] & 0x03ffffff) << 2);
+		const uint32_t *tw = is_ptr(t);
+		if (tw && (t & 0x1fffffff) < 0x800000 && (t & 0x1ffffc) <= 0x200000 - 32 &&
+		    (tw[0] & 0xffff0000) == 0x3c040000 && (tw[1] & 0xffff0000) == 0x8c830000 && tw[2] == 0 &&
+		    tw[3] == 0x00031080 && tw[4] == 0x00431021 && tw[5] == 0x24420001 && tw[6] == 0x03e00008 &&
+		    tw[7] == (0xac820000 | (tw[1] & 0xffff))) {
+			aux[0] = (tw[0] << 16) + (uint32_t)(int32_t)(int16_t)tw[1];   /* x */
+			aux[1] = t;
+			return IS_R;
+		}
+	}
 	return IS_NONE;
+}
+
+/* z -> a*z + b (mod 2^32), applied m times */
+static uint32_t lcg_jump(uint32_t z, uint32_t a, uint32_t b, uint32_t m)
+{
+	uint32_t ra = 1, rb = 0;                 /* accumulated map, identity */
+	while (m) {
+		if (m & 1) { rb = a * rb + b; ra *= a; }
+		b = a * b + b; a *= a;               /* square the step map */
+		m >>= 1;
+	}
+	return ra * z + rb;
 }
 
 static void idleskip_init(void)
@@ -118,6 +169,10 @@ static void idleskip_init(void)
 	const char *e = getenv("EROSQ_IDLESKIP");
 	idleskip_on = e ? atoi(e) : 1;   /* default ON (device A/B 10-22: MGS +8%, Spyro +5%, Ape +7%); EROSQ_IDLESKIP=0 is the kill-switch */
 	idleskip_stat = getenv("EROSQ_IDLESKIP_STAT") != NULL;
+	{
+		const char *e2 = getenv("EROSQ_IDLESKIP2");
+		idleskip2_on = e2 ? atoi(e2) : 0;   /* round 2: default off until its device A/B */
+	}
 	if (idleskip_on > 0) {
 		uintptr_t lo, hi;
 		mipsrec_code_range(&lo, &hi);
@@ -127,13 +182,13 @@ static void idleskip_init(void)
 			idleskip_on = 0;
 			return;
 		}
-		fprintf(stderr, "mipsrec: idleskip on\n");
+		fprintf(stderr, "mipsrec: idleskip on%s\n", idleskip2_on > 0 ? " (+round 2)" : "");
 	}
 }
 
 static void idleskip_print(void)
 {
-	static const char *const nm[IS_N] = { "-", "V", "I", "A" };
+	static const char *const nm[IS_N] = { "-", "V", "I", "A", "P", "R" };
 	for (int s = 1; s < IS_N; s++)
 		fprintf(stderr, "idleskip %s: blocks %lu calls %lu skips %lu iters %llu\n",
 			nm[s], is_blocks[s], is_calls[s], is_skips[s], is_iters[s]);
@@ -167,6 +222,31 @@ extern "C" uint64_t mipsrec_idle_entry(uint32_t pc, uint32_t ra)
 			return ret;
 		C = is_clk(7) + is_clk(2) + is_clk(3);
 		break; }
+	case IS_P: {
+		const uint32_t *w = is_ptr(pc);
+		const uint32_t *pv1 = is_ptr(r[28] + (uint32_t)(int32_t)(int16_t)w[0]);
+		if (!pv1) return ret;
+		const uint32_t v1 = *pv1;
+		const uint32_t *cnt = is_ptr(v1 + (uint32_t)(int32_t)(int16_t)w[2]);
+		const uint32_t zb = v1 + (uint32_t)(int32_t)(int16_t)w[7];
+		const uint32_t *busy = is_ptr(zb & ~3u);
+		const uint32_t *cd = is_ptr(r[28] + (uint32_t)(int32_t)(int16_t)w[11]);
+		if (!cnt || !busy || !cd || !(*cnt < (uint32_t)(int32_t)(int16_t)w[4]))
+			return ret;                      /* timeout path next */
+		if ((*busy >> ((zb & 3) * 8)) & 0xff)
+			C = is_clk(11);                  /* exits at bnez v0,L */
+		else if ((int32_t)*cd > 0)
+			C = is_clk(15);                  /* exits at bgtz v0,L */
+		else
+			return ret;                      /* leaves the loop */
+		break; }
+	case IS_R: {
+		const uint32_t *w = is_ptr(pc);
+		const uint32_t *flag = is_ptr(r[17] + (uint32_t)(int32_t)(int16_t)w[3]);
+		if (!is_ptr(aux[0]) || !is_ptr(r[16] + (uint32_t)(int32_t)(int16_t)w[2]) || !flag || *flag)
+			return ret;
+		C = is_clk(2) + is_clk(8) + is_clk(15);   /* jal; T; return block to the beqz */
+		break; }
 	default: {   /* IS_A */
 		const uint32_t *v = is_ptr(r[4] + 4);
 		if (!v || !((int32_t)*v < (int32_t)r[5]))
@@ -195,6 +275,30 @@ extern "C" uint64_t mipsrec_idle_entry(uint32_t pc, uint32_t ra)
 		r[2] = r[16] = 0xffffffffu;
 		r[31] = pc + 0x1c;
 		break;
+	/* registers as the last skipped iteration leaves them: an IRQ inside the
+	 * crossing iteration makes the BIOS save them all to RAM */
+	case IS_P: {
+		const uint32_t *w = is_ptr(pc);
+		const uint32_t v1 = *is_ptr(r[28] + (uint32_t)(int32_t)(int16_t)w[0]);
+		const uint32_t zb = v1 + (uint32_t)(int32_t)(int16_t)w[7];
+		const uint32_t busy = (*is_ptr(zb & ~3u) >> ((zb & 3) * 8)) & 0xff;
+		r[3] = v1;
+		r[2] = busy ? busy : *is_ptr(r[28] + (uint32_t)(int32_t)(int16_t)w[11]);
+		break; }
+	case IS_R: {
+		const uint32_t *w = is_ptr(pc);
+		const uint32_t ya = r[16] + (uint32_t)(int32_t)(int16_t)w[2];
+		uint32_t *x = is_ptr(aux[0]), *y = is_ptr(ya);
+		*x = lcg_jump(*x, 5, 1, m);
+		const uint32_t yp = lcg_jump(*y, 69069, 69069, m - 1);
+		*y = 69069 * (yp + 1);               /* y = 69069*(y+1) */
+		r[2] = *y;                           /* v0 = new y */
+		r[3] = 66976 * (yp + 1);             /* v1 = (2093*(y+1)) << 5, the shift chain's last write */
+		r[4] = 0;                            /* a0 = the vsync flag, still 0 */
+		r[31] = pc + 8;                      /* ra from the jal */
+		psxCpu->Clear(aux[0] & ~3u, 1);      /* as the guest stores would (SMC) */
+		psxCpu->Clear(ya & ~3u, 1);
+		break; }
 	default:
 		r[2] = 1;
 		break;
