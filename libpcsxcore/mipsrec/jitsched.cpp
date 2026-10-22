@@ -457,15 +457,28 @@ static int ua_branch(mcontext_t *mc, uint32_t pc, uint32_t w, uint32_t *next)
 	return 0;
 }
 
-/* kernel-equivalent completion of the unaligned access at mc->pc (step 1);
- * 0 = not a decodable access */
+/* the trapping add/addi/sub w as the wrapping one (the pre-Ov behaviour);
+ * 0 = not one */
+static int ua_arith(mcontext_t *mc, uint32_t w)
+{
+	greg_t *g = mc->gregs;
+	const int op = w >> 26, rs = (w >> 21) & 31, rt = (w >> 16) & 31, rd = (w >> 11) & 31;
+	if (op == 0x08) { ua_wr(g, rt, ua_rd(g, rs) + (uint32_t)(int32_t)(int16_t)w); return 1; }
+	if (op == 0 && (w & 0x7ff) == 0x20) { ua_wr(g, rd, ua_rd(g, rs) + ua_rd(g, rt)); return 1; }
+	if (op == 0 && (w & 0x7ff) == 0x22) { ua_wr(g, rd, ua_rd(g, rs) - ua_rd(g, rt)); return 1; }
+	return 0;
+}
+
+/* kernel-equivalent completion of the unaligned access (step 1) or the
+ * overflowing add/sub at mc->pc; 0 = not a decodable one */
 static int ua_complete(mcontext_t *mc)
 {
 	const uint32_t pc = (uint32_t)mc->pc, w = *(const uint32_t *)(uintptr_t)pc;
-	uint32_t next;
-	if (ua_access(mc, w))
+	uint32_t next, w2;
+	if (ua_access(mc, w) || ua_arith(mc, w))
 		mc->pc = pc + 4;
-	else if (ua_branch(mc, pc, w, &next) && ua_access(mc, *(const uint32_t *)(uintptr_t)(pc + 4)))
+	else if (ua_branch(mc, pc, w, &next) &&
+		 (w2 = *(const uint32_t *)(uintptr_t)(pc + 4), ua_access(mc, w2) || ua_arith(mc, w2)))
 		mc->pc = next;   /* the access was in the branch's delay slot (EPC = branch) */
 	else
 		return 0;
@@ -521,7 +534,7 @@ static void ee_index(uint32_t *host, uint32_t gpc)
 static mcontext_t ee_ctx;
 static volatile int ee_pending;
 static int ee_mode = 1;
-static unsigned long ee_exact_n, ee_fb_n, ee_why[8], ee_emul, ee_hoist;
+static unsigned long ee_exact_n, ee_ovf_n, ee_fb_n, ee_why[8], ee_emul, ee_hoist;
 extern "C" void ee_trap(void);
 asm(".pushsection .jitsched_text,\"ax\",@progbits\n"
     ".globl ee_trap\n.type ee_trap,@function\n.set push\n.set noreorder\n"
@@ -716,7 +729,8 @@ static int ee_exact(void)
 	uint32_t F = (pc - ee_idx[lo].host) / 4, w = *(const uint32_t *)(uintptr_t)pc;
 	if (ee_is_branch(w)) { F++; w = *(const uint32_t *)(uintptr_t)(pc + 4); }
 	const int hop = w >> 26;
-	if (hop != 0x21 && hop != 0x25 && hop != 0x23 && hop != 0x29 && hop != 0x2b) return 0;
+	const int ovf = hop == 0x08 || (hop == 0 && ((w & 0x7ff) == 0x20 || (w & 0x7ff) == 0x22));
+	if (!ovf && hop != 0x21 && hop != 0x25 && hop != 0x23 && hop != 0x29 && hop != 0x2b) return 0;
 	if (F >= DRY_MAX_WORDS) return 0;
 
 	int fd[2];
@@ -750,11 +764,24 @@ static int ee_exact(void)
 	if (!gp) { ee_why[5]++; return 0; }
 	const uint32_t gw = *gp, op = gw >> 26, rs = (gw >> 21) & 31;
 	const uint32_t addr = r.gpr[rs] + (uint32_t)(int32_t)(int16_t)gw;
-	if (!(addr & ((op == 0x23 || op == 0x2b) ? 3 : 1)) || op != (uint32_t)hop) { ee_why[6]++; return 0; }
+	if (ovf ? !(op == 0x08 || (op == 0 && ((gw & 0x7ff) == 0x20 || (gw & 0x7ff) == 0x22)))
+		: (!(addr & ((op == 0x23 || op == 0x2b) ? 3 : 1)) || op != (uint32_t)hop)) { ee_why[6]++; return 0; }
 	const int bd = pp && ee_guest_branch(*pp);
 
 	for (int k = 1; k < 32; k++)
 		psxRegs.GPR.r[k] = r.gpr[k];
+	if (ovf) {   /* as psxADD/psxADDI/psxSUB: Ov, rd/rt unwritten */
+		psxRegs.cycle += is_clk((r.gpc - gpc0) / 4 + 1);
+		psxRegs.pc = r.gpc;
+		const enum R3000Abdt bdt = !bd ? R3000A_BRANCH_NONE_OR_EXCEPTION :
+			ee_taken(*pp, r.gpr) ? R3000A_BRANCH_TAKEN : R3000A_BRANCH_NOT_TAKEN;
+		psxException((R3000E_Ov << 2) | ((gw & 0x0c000000) << 2), bdt, &psxRegs.CP0);
+		ee_ovf_n++;
+		ee_ctx.pc = loop;
+		ee_ctx.gregs[2] = (greg_t)(int32_t)psxRegs.pc;
+		ee_ctx.gregs[3] = 0;
+		return 1;
+	}
 	/* earlier stores of the same series ran but their SMC check comes after
 	 * the series: clear for them as the block would have */
 	for (uint32_t k = r.gpc - 4; k >= gpc0 && k < r.gpc; k -= 4) {
@@ -808,6 +835,28 @@ static void ee_sigtrap(int sig, siginfo_t *si, void *ucv)
 	signal(SIGTRAP, SIG_DFL);
 }
 
+static int ee_redirect(mcontext_t *mc);
+/* SIGFPE in JIT code from a guest ADD/ADDI/SUB (host trapping add/addi/sub,
+ * possibly in a host branch's delay slot): raise the guest Ov exception */
+static struct sigaction ee_prev_fpe;
+static void ee_sigfpe(int sig, siginfo_t *si, void *ucv)
+{
+	mcontext_t *mc = &((ucontext_t *)ucv)->uc_mcontext;
+	const uint32_t pc = (uint32_t)mc->pc;
+	if (pc >= ua_jlo && pc < ua_jhi && !(pc & 3)) {
+		uint32_t w = *(const uint32_t *)(uintptr_t)pc;
+		if (ee_is_branch(w))
+			w = *(const uint32_t *)(uintptr_t)(pc + 4);
+		const int op = w >> 26;
+		if ((op == 0x08 || (op == 0 && ((w & 0x7ff) == 0x20 || (w & 0x7ff) == 0x22))) &&
+		    (ee_redirect(mc) || ua_complete(mc)))
+			return;
+	}
+	if ((ee_prev_fpe.sa_flags & SA_SIGINFO) && ee_prev_fpe.sa_sigaction) { ee_prev_fpe.sa_sigaction(sig, si, ucv); return; }
+	if (ee_prev_fpe.sa_handler == SIG_IGN) return;
+	signal(SIGFPE, SIG_DFL);
+}
+
 /* SIGBUS in JIT code: save the context, run ee_resolve below the interrupted sp */
 static int ee_redirect(mcontext_t *mc)
 {
@@ -854,8 +903,8 @@ chain:
 static void ua_report(void)
 {
 	fprintf(stderr, "unaligned: host %lu jit %lu undecoded %lu\n", ua_host, ua_jit, ua_bad);
-	fprintf(stderr, "unaligned: exact %lu fallback %lu index-peak %u blocks; emulated %lu hoisted %lu (why io %lu cmp %lu acc %lu alu %lu hoist %lu bios %lu chk %lu)\n",
-		ee_exact_n, ee_fb_n, ee_peak, ee_emul, ee_hoist, ee_why[0], ee_why[1], ee_why[2], ee_why[3], ee_why[4], ee_why[5], ee_why[6]);
+	fprintf(stderr, "unaligned: exact %lu (overflow %lu) fallback %lu index-peak %u blocks; emulated %lu hoisted %lu (why io %lu cmp %lu acc %lu alu %lu hoist %lu bios %lu chk %lu)\n",
+		ee_exact_n, ee_ovf_n, ee_fb_n, ee_peak, ee_emul, ee_hoist, ee_why[0], ee_why[1], ee_why[2], ee_why[3], ee_why[4], ee_why[5], ee_why[6]);
 }
 
 extern "C" void mipsrec_ua_report(void) { ua_report(); }   /* offline harness */
@@ -874,6 +923,8 @@ static void ua_install(void)
 		ee_mode = e ? atoi(e) : 1;
 		sa.sa_sigaction = ee_sigtrap;
 		sigaction(SIGTRAP, &sa, &ee_prev_trap);
+		sa.sa_sigaction = ee_sigfpe;
+		sigaction(SIGFPE, &sa, &ee_prev_fpe);
 	}
 	syscall(__NR_sysmips, 7 /* MIPS_FIXADE */, 0, 0);   /* this (emu) thread only; ENOSYS under qemu-user (SIGBUS there anyway) */
 	if (getenv("EROSQ_PROF"))

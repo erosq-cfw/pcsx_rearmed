@@ -76,7 +76,38 @@ static void recADDIU()
 			SetFuzzyScratchpadAddr(_Rt_);
 	}
 }
-static void recADDI() { recADDIU(); }
+/* EROSQ: ADD/ADDI/SUB raise the guest overflow exception. The host's own
+ * trapping add/addi/sub do the check for free: an overflow is a SIGFPE in
+ * JIT code, which jitsched.cpp's exact-exception resolver turns into the
+ * guest Ov exception (DRY_NOTE marks the word for its dry run). The
+ * destination is marked changed only after the word, so the dry run sees
+ * the state the exception must expose. Constant operands that cannot
+ * overflow keep the ADDU/ADDIU/SUBU paths and their const propagation. */
+static void recOvf(u32 word, u32 d, u32 s, u32 t, bool is_imm)
+{
+	const u32 rs = regMipsToHost(s, REG_LOAD, REG_REGISTER);
+	const u32 rt = is_imm ? 0 : (t == s ? rs : regMipsToHost(t, REG_LOAD, REG_REGISTER));
+	const u32 rd = !d ? 0 : d == s ? rs : (!is_imm && d == t) ? rt : regMipsToHost(d, REG_FIND, REG_REGISTER);
+	DRY_NOTE(pc - 4);
+	if (is_imm)
+		write32(word | (rs << 21) | (rd << 16));
+	else
+		write32(word | (rs << 21) | (rt << 16) | (rd << 11));
+	SetUndef(d);
+	regMipsChanged(d);
+	regUnlock(rd);
+	regUnlock(rs);
+	regUnlock(rt);
+}
+
+static void recADDI()
+{
+	if (IsConst(_Rs_) && (s64)(s32)GetConst(_Rs_) + _Imm_ == (s32)(GetConst(_Rs_) + _Imm_)) {
+		recADDIU();
+		return;
+	}
+	recOvf(0x20000000 | (_Imm_ & 0xffff), _Rt_, _Rs_, 0, true);
+}
 
 static void recSLTI()
 {
@@ -314,7 +345,15 @@ static void recADDU()
 	if (fuzzy_scratchpad_addr)
 		SetFuzzyScratchpadAddr(_Rd_);
 }
-static void recADD()  { recADDU(); }
+static void recADD()
+{
+	if (IsConst(_Rs_) && IsConst(_Rt_) &&
+	    (s64)(s32)GetConst(_Rs_) + (s32)GetConst(_Rt_) == (s32)(GetConst(_Rs_) + GetConst(_Rt_))) {
+		recADDU();
+		return;
+	}
+	recOvf(0x00000020, _Rd_, _Rs_, _Rt_, false);
+}
 
 static void recSUBU()
 {
@@ -333,7 +372,15 @@ static void recSUBU()
 	if (set_const)
 		SetConst(_Rd_, GetConst(_Rs_) - GetConst(_Rt_));
 }
-static void recSUB()  { recSUBU(); }
+static void recSUB()
+{
+	if (IsConst(_Rs_) && IsConst(_Rt_) &&
+	    (s64)(s32)GetConst(_Rs_) - (s32)GetConst(_Rt_) == (s32)(GetConst(_Rs_) - GetConst(_Rt_))) {
+		recSUBU();
+		return;
+	}
+	recOvf(0x00000022, _Rd_, _Rs_, _Rt_, false);
+}
 
 static void recAND()
 {
