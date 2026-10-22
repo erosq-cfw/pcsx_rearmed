@@ -639,6 +639,8 @@ static void dry_note(u32 gpc)
 
 static void recReset();
 static void recRecompile();
+extern "C" uint32_t mipsrec_cio_run(void);   /* jitsched.cpp: AdEL for a misaligned pc */
+extern "C" void mipsrec_fixade_arm(void);    /* jitsched.cpp: FIXADE off on the executing thread */
 static void recClear(u32 Addr, u32 Size);
 static void recNotify(int note, void *data);
 
@@ -1548,6 +1550,9 @@ __asm__ __volatile__ (
 "addu  $t3, $t3, $v1                          \n" // $t3 = psxRegs.cycle + $v1
 "andi  $t0, $v0, 0xffff                       \n"
 "addu  $t2, $t0, $t1                          \n"
+"andi  $t5, $v0, 3                            \n" // EROSQ: jr/jalr to a misaligned target? Never
+"bnez  $t5, misaligned_pc%=                   \n" //  load its (misaligned) slot: a kernel without
+"nop                                          \n" //  the trap would read garbage (device psxtest)
 "lw    $t0, 0($t2)                            \n" // $t0 = address of start of block code, or
                                                   //       or 0 if block needs recompilation
                                                   // IMPORTANT: leave block ptr in $t2, it gets
@@ -1574,6 +1579,15 @@ __asm__ __volatile__ (
 ////////////////////////////
 
 // Call psxBranchTest() and go back to top of loop
+// EROSQ: misaligned guest pc -> AdEL on the fetch (mipsrec_cio_run raises it
+//  like the interpreter's doBranchRegE and returns the new pc)
+"misaligned_pc%=:                             \n"
+"sw    $t3, %[psxRegs_cycle_off]($fp)         \n" // charge the exiting block's cycles
+"jal   %[cioRun]                              \n"
+"sw    $v0, %[psxRegs_pc_off]($fp)            \n" // <BD> psxRegs.pc = the misaligned target
+"b     loop%=                                 \n"
+"move  $v1, $zero                             \n" // <BD>
+
 "call_psxBranchTest%=:                        \n"
 "jal   %[psxBranchTest]                       \n"
 "sw    $v0, %[psxRegs_pc_off]($fp)            \n" // <BD> Use BD slot to store new psxRegs.pc val,
@@ -1617,6 +1631,7 @@ __asm__ __volatile__ (
   [psxRegs_io_cycle_ctr_off]   "i" (off(io_cycle_counter)),
   [recRecompile]               "i" (&recRecompile),
   [psxBranchTest]              "i" (&mipsrec_branch_test),
+  [cioRun]                     "i" (&mipsrec_cio_run),
   [psxRegs_stop_off]           "i" (off(stop)),
   [psxRecLUT]                  "i" (psxRecLUT)
 : // Clobber - No need to list anything but 'saved' regs
@@ -1892,6 +1907,9 @@ __asm__ __volatile__ (
 "addu  $t3, $t3, $v1                          \n" // $t3 = psxRegs.cycle + $v1
 "andi  $t0, $v0, 0xffff                       \n"
 "addu  $t2, $t0, $t1                          \n"
+"andi  $t5, $v0, 3                            \n" // EROSQ: jr/jalr to a misaligned target? Never
+"bnez  $t5, misaligned_pc%=                   \n" //  load its (misaligned) slot: a kernel without
+"nop                                          \n" //  the trap would read garbage (device psxtest)
 "lw    $t0, 0($t2)                            \n" // $t0 = address of start of block code, or
                                                   //       or 0 if block needs recompilation
                                                   // IMPORTANT: leave block ptr in $t2, it gets
@@ -1924,6 +1942,15 @@ __asm__ __volatile__ (
 ////////////////////////////
 
 // Call psxBranchTest() and go back to top of loop
+// EROSQ: misaligned guest pc -> AdEL on the fetch (mipsrec_cio_run raises it
+//  like the interpreter's doBranchRegE and returns the new pc)
+"misaligned_pc%=:                             \n"
+"sw    $t3, %[psxRegs_cycle_off]($fp)         \n" // charge the exiting block's cycles
+"jal   %[cioRun]                              \n"
+"sw    $v0, %[psxRegs_pc_off]($fp)            \n" // <BD> psxRegs.pc = the misaligned target
+"b     loop%=                                 \n"
+"move  $v1, $zero                             \n" // <BD>
+
 "call_psxBranchTest%=:                        \n"
 "jal   %[psxBranchTest]                       \n"
 "sw    $v0, %[psxRegs_pc_off]($fp)            \n" // <BD> Store new psxRegs.pc val before calling C
@@ -2015,6 +2042,7 @@ __asm__ __volatile__ (
   [psxRegs_io_cycle_ctr_off]   "i" (off(io_cycle_counter)),
   [recRecompile]               "i" (&recRecompile),
   [psxBranchTest]              "i" (&mipsrec_branch_test),
+  [cioRun]                     "i" (&mipsrec_cio_run),
   [psxRegs_stop_off]           "i" (off(stop)),
   [psxRecLUT]                  "i" (psxRecLUT)
 : // Clobber - No need to list anything but 'saved' regs
@@ -2458,6 +2486,7 @@ static void recExecute()
 	use_indirect_return_dispatch_loop = Config.HLE;
 #endif
 
+	mipsrec_fixade_arm();
 	if (use_indirect_return_dispatch_loop) {
 		if (rec_mem_mapped)
 			recExecute_indirect_return_mmap();
