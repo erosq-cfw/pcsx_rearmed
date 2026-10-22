@@ -10,6 +10,7 @@
 
 #include <stdint.h>
 #include <string.h>
+#include <stdlib.h>
 #include "cspace.h"
 #include "compiler_features.h"
 
@@ -419,6 +420,99 @@ static void bgr555_to_rgb565_368_to_320(uint32_t * __restrict__ dst,
 }
 #undef S368
 
+#ifdef HAVE_bgr555_to_rgb565_mxu
+/* EROSQ X1000 (2026-10-22, EROSQ_CS368=1, default off): the 368->320 picks
+ * above as an MXU kernel, two 23-pixel groups (46 src px = 23 aligned words
+ * -> 40 dst px = 20 words) per iteration, so src stays word-aligned. Picks
+ * per group: (0,1)(2,3)(4,5)(6,8)(9,10)(11,12)(13,14)(16,17)(18,19)(20,21);
+ * the second group starts at px 23 (high half of word 11). Pairs straddling
+ * words are built with S32ALNI {lo(next):hi(prev)}, the (6,8) pairs with
+ * S32SFL halves. The convert is the proven bgr555_to_rgb565 MXU pipeline.
+ * Bit-exact (frontend/test_cspace_mxu.cpp, 368 cases). */
+static int cs368_mxu_on(void)
+{
+	static int on = -1;
+	if (on < 0) {
+		const char *e = getenv("EROSQ_CS368");
+		on = e && atoi(e) > 0;
+	}
+	return on;
+}
+
+/* convert the two packed bgr555 pairs in XRa, XRb to rgb565 and store them
+ * at byte offset off (temps XR1 XR2 XR4..XR7, XR15 = green mask) */
+#define CS368_CONV2(a, b, off) do { \
+	MXU_Q16SLL(MXU_XR1, a, b, MXU_XR2, 1); \
+	MXU_Q16SLL(MXU_XR4, a, b, MXU_XR5, 11); \
+	MXU_Q16SLR(MXU_XR6, MXU_XR1, MXU_XR2, MXU_XR7, 11); \
+	MXU_S32AND(MXU_XR1, MXU_XR1, MXU_XR15); \
+	MXU_S32AND(MXU_XR2, MXU_XR2, MXU_XR15); \
+	MXU_S32OR(MXU_XR4, MXU_XR4, MXU_XR1); \
+	MXU_S32OR(MXU_XR4, MXU_XR4, MXU_XR6); \
+	MXU_S32OR(MXU_XR5, MXU_XR5, MXU_XR2); \
+	MXU_S32OR(MXU_XR5, MXU_XR5, MXU_XR7); \
+	CS_STD(MXU_XR4, dst, off); \
+	CS_STD(MXU_XR5, dst, (off) + 4); \
+} while (0)
+
+static void bgr555_to_rgb565_368_to_320_mxu(uint32_t * __restrict__ dst,
+	const uint16_t * __restrict__ src)
+{
+	int g;
+	MXU_S32I2M(MXU_XR16, 1);          /* enable MXU ALU */
+	MXU_S32I2M(MXU_XR15, 0x07c007c0); /* green mask */
+	for (g = 0; g < 8; g++, src += 46, dst += 20) {   /* 8 x 46 = 368 */
+		/* group A: px 0..22 */
+		CS_LDD(MXU_XR8, src, 0);                              /* px1 :px0  */
+		CS_LDD(MXU_XR9, src, 4);                              /* px3 :px2  */
+		CS368_CONV2(MXU_XR8, MXU_XR9, 0);
+		CS_LDD(MXU_XR8, src, 8);                              /* px5 :px4  */
+		CS_LDD(MXU_XR10, src, 12);                            /* px7 :px6  */
+		CS_LDD(MXU_XR11, src, 16);                            /* px9 :px8  */
+		MXU_S32SFL(MXU_XR0, MXU_XR11, MXU_XR10, MXU_XR9, 3);  /* px8 :px6  */
+		CS368_CONV2(MXU_XR8, MXU_XR9, 8);
+		CS_LDD(MXU_XR12, src, 20);                            /* px11:px10 */
+		CS_LDD(MXU_XR13, src, 24);                            /* px13:px12 */
+		MXU_S32ALNI(MXU_XR8, MXU_XR12, MXU_XR11, 2);          /* px10:px9  */
+		MXU_S32ALNI(MXU_XR9, MXU_XR13, MXU_XR12, 2);          /* px12:px11 */
+		CS368_CONV2(MXU_XR8, MXU_XR9, 16);
+		CS_LDD(MXU_XR10, src, 28);                            /* px15:px14 */
+		MXU_S32ALNI(MXU_XR8, MXU_XR10, MXU_XR13, 2);          /* px14:px13 */
+		CS_LDD(MXU_XR9, src, 32);                             /* px17:px16 */
+		CS368_CONV2(MXU_XR8, MXU_XR9, 24);
+		CS_LDD(MXU_XR8, src, 36);                             /* px19:px18 */
+		CS_LDD(MXU_XR9, src, 40);                             /* px21:px20 */
+		CS368_CONV2(MXU_XR8, MXU_XR9, 32);
+		/* group B: px 23..45 */
+		CS_LDD(MXU_XR10, src, 44);                            /* px23:px22 */
+		CS_LDD(MXU_XR11, src, 48);                            /* px25:px24 */
+		CS_LDD(MXU_XR12, src, 52);                            /* px27:px26 */
+		MXU_S32ALNI(MXU_XR8, MXU_XR11, MXU_XR10, 2);          /* px24:px23 */
+		MXU_S32ALNI(MXU_XR9, MXU_XR12, MXU_XR11, 2);          /* px26:px25 */
+		CS368_CONV2(MXU_XR8, MXU_XR9, 40);
+		CS_LDD(MXU_XR13, src, 56);                            /* px29:px28 */
+		CS_LDD(MXU_XR10, src, 60);                            /* px31:px30 */
+		MXU_S32ALNI(MXU_XR8, MXU_XR13, MXU_XR12, 2);          /* px28:px27 */
+		MXU_S32SFL(MXU_XR9, MXU_XR10, MXU_XR13, MXU_XR0, 3);  /* px31:px29 */
+		CS368_CONV2(MXU_XR8, MXU_XR9, 48);
+		CS_LDD(MXU_XR8, src, 64);                             /* px33:px32 */
+		CS_LDD(MXU_XR9, src, 68);                             /* px35:px34 */
+		CS368_CONV2(MXU_XR8, MXU_XR9, 56);
+		CS_LDD(MXU_XR8, src, 72);                             /* px37:px36 */
+		CS_LDD(MXU_XR10, src, 76);                            /* px39:px38 */
+		CS_LDD(MXU_XR11, src, 80);                            /* px41:px40 */
+		MXU_S32ALNI(MXU_XR9, MXU_XR11, MXU_XR10, 2);          /* px40:px39 */
+		CS368_CONV2(MXU_XR8, MXU_XR9, 64);
+		CS_LDD(MXU_XR12, src, 84);                            /* px43:px42 */
+		CS_LDD(MXU_XR13, src, 88);                            /* px45:px44 */
+		MXU_S32ALNI(MXU_XR8, MXU_XR12, MXU_XR11, 2);          /* px42:px41 */
+		MXU_S32ALNI(MXU_XR9, MXU_XR13, MXU_XR12, 2);          /* px44:px43 */
+		CS368_CONV2(MXU_XR8, MXU_XR9, 72);
+	}
+}
+#undef CS368_CONV2
+#endif
+
 void bgr555_to_rgb565_scaled_to_320(void * __restrict__ dst_,
 	const void * __restrict__ src_, int dpixels)
 {
@@ -429,6 +523,12 @@ void bgr555_to_rgb565_scaled_to_320(void * __restrict__ dst_,
 	if (dpixels > 320)
 		dpixels = 320;
 	if (scaled_src_w == 368 && dpixels == 320 && !((uintptr_t)dst_ & 3)) {
+#ifdef HAVE_bgr555_to_rgb565_mxu
+		if (!((uintptr_t)src & 3) && cs368_mxu_on()) {
+			bgr555_to_rgb565_368_to_320_mxu(dst_, src);
+			return;
+		}
+#endif
 		bgr555_to_rgb565_368_to_320(dst_, src);
 		return;
 	}

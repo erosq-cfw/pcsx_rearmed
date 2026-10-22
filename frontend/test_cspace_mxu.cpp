@@ -58,6 +58,7 @@ static inline uint32_t hx_slr16(uint32_t x, int s) {
 #define MXU_S32OR(a, b, c)  HX_SET(a, host_xr[b] | host_xr[c])
 #define MXU_XR11 11
 #define MXU_XR12 12
+#define MXU_XR13 13
 /* S32SFL ptn2==3 (halfword) and S32ALNI ptn3==2, per QEMU mxu_translate.c */
 #define MXU_S32SFL(a, b, c, d, ptn2) do { \
 	uint32_t _b = host_xr[b], _c = host_xr[c]; \
@@ -156,7 +157,31 @@ static void run_case_512(int dpixels, int src_off) {
 	}
 }
 
+/* ---- 368->320 MXU (EROSQ_CS368=1) vs pick x*368/320 + convert ---- */
+static void run_case_368(int src_off, int dst_mis) {
+	static uint16_t s368[GUARD + 400 + GUARD], o[GUARD + 330 + GUARD], r[GUARD + 330 + GUARD];
+	for (unsigned i = 0; i < sizeof(s368) / 2; i++) s368[i] = (uint16_t)rnd();
+	for (unsigned i = 0; i < sizeof(o) / 2; i++) o[i] = r[i] = (uint16_t)rnd();
+	const uint16_t *src = s368 + GUARD + src_off;
+	for (int x = 0; x < 320; x++) ref_convert(&r[GUARD + dst_mis + x], &src[x * 368 / 320], 1);
+	bgr555_to_rgb565_scaled_setup(368);
+	bgr555_to_rgb565_scaled_to_320(o + GUARD + dst_mis, src, 320);
+	if (memcmp(o, r, sizeof(o)) != 0) {
+		fprintf(stderr, "FAIL368 src_off=%d dst_mis=%d\n", src_off, dst_mis);
+		for (unsigned i = 0; i < sizeof(o) / 2 && fails < 8; i++)
+			if (o[i] != r[i]) { fprintf(stderr, "  [%d] got=%04x ref=%04x\n", (int)i - GUARD, o[i], r[i]); fails++; }
+	}
+}
+
 int main(void) {
+	/* 368: MXU (EROSQ_CS368=1; even src + even dst) and the scalar fallbacks
+	 * (odd src -> 368 scalar, odd dst -> generic xmap loop) */
+	setenv("EROSQ_CS368", "1", 1);   /* read once (cs368_mxu_on caches it) */
+	for (int t = 0; t < 2000; t++)
+		for (int so = 0; so <= 1; so++)
+			for (int dm = 0; dm <= 1; dm++)
+				run_case_368(so, dm);
+
 	/* every length 0..64 (covers head/tail + all pixels%4), each at the four
 	 * src/dst alignment parities (matched -> MXU path, mismatched -> scalar
 	 * fallback), then random larger lengths. */
@@ -179,6 +204,6 @@ int main(void) {
 		run_case_512((int)(rnd() % 330), rnd() & 1);
 
 	if (fails) { printf("bgr555 MXU: FAILED (%d mismatches shown)\n", fails); return 1; }
-	printf("bgr555 MXU OK (incl. 512_to_320)\n");
+	printf("bgr555 MXU OK (incl. 512_to_320, 368_to_320)\n");
 	return 0;
 }
