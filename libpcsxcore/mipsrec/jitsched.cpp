@@ -12,6 +12,7 @@
 #include "jitsched.h"
 #include "../r3000a.h"
 #include "../psxmem.h"
+#include "../psxcounters.h"
 
 /* all zero-initialised (.bss, appended last): a .data entry would move
  * every pre-existing .data/.bss symbol */
@@ -54,8 +55,21 @@ static unsigned long js_blocks, js_changed, js_regions;
  *      y = 69069*(y+1) at another; loop while a vsync-flag word is 0. The m
  *      skipped iterations' net effect is both LCGs jumped m steps ahead
  *      (closed form), written back; every register the loop reads is
- *      rewritten before the read in the real iteration that follows. */
-enum { IS_NONE, IS_V, IS_I, IS_A, IS_P, IS_R, IS_N };
+ *      rewritten before the read in the real iteration that follows.
+ *   D  libgpu DrawSync (Ape, Rollcage; same PsyQ code elsewhere): jal H
+ *      (H: VSync(-1) vs a deadline, ++counter, give up past 0xf0000); then
+ *      poll DMA2 CHCR busy (bit 24) and GPUSTAT ready (bit 26). Its inputs
+ *      are hardware: CHCR changes only at the GPU-DMA event (next_interupt);
+ *      GPUSTAT's ready bit comes from psxRegs.gpuIdleAfter, timer 1 from
+ *      rcnts[1] -- both cycle functions on the emu thread (USE_ASYNC_GPU is
+ *      off). A skip needs the previous hook call at the same pc exactly C
+ *      cycles earlier with next_interupt unchanged (a whole real iteration,
+ *      no event: its GPUSTAT read already flushed gpulib's command buffer),
+ *      and m stays below the next timer-1 tick, the gpuIdleAfter flip and
+ *      the counter's give-up. Net effect: counter += m, a0 = old count of
+ *      the last skipped iteration; every other register and stack slot is
+ *      what the previous iteration left. */
+enum { IS_NONE, IS_V, IS_I, IS_A, IS_P, IS_R, IS_D, IS_N };
 static void jitsched_init(void);
 static int idleskip_on, idleskip_stat, idleskip2_on;
 static int cur_words, cur_idle;   /* entry room of the block being compiled */
@@ -149,6 +163,55 @@ static int idle_match(uint32_t pc, uint32_t *aux)
 			return IS_R;
 		}
 	}
+	/* D: DrawSync loop at pc; aux = H, VSync (checked below), H's return */
+	{
+		static const uint32_t dl[20] = { 0, 0, 0x14400000, 0x2402ffff, 0x3c020000, 0x8c420000, 0, 0x8c420000,
+			0x3c030100, 0x00431024, 0x1440fff5, 0, 0x3c020000, 0x8c420000, 0, 0x8c420000, 0x3c030400,
+			0x00431024, 0x1040ffed, 0x00001021 };
+		static const uint32_t dm[20] = { 0, ~0u, 0xffff0000, ~0u, 0xffff0000, 0xffff0000, ~0u, ~0u, ~0u, ~0u, ~0u,
+			~0u, 0xffff0000, 0xffff0000, ~0u, ~0u, ~0u, ~0u, ~0u, ~0u };
+		static const uint32_t hl[21] = { 0x27bdffe0, 0xafbf0018, 0, 0x2404ffff, 0x3c030000, 0x8c630000, 0,
+			0x0062182a, 0x1460000c, 0, 0x3c030000, 0x24630000, 0x8c620000, 0, 0x00402021, 0x24420001,
+			0xac620000, 0x3c02000f, 0x0044102a, 0x10400038, 0 };
+		static const uint32_t vl[28] = { 0x3c020000, 0x8c420000, 0x3c050000, 0x8ca50000, 0x27bdffd8, 0xafbf0020,
+			0xafb1001c, 0xafb00018, 0x8c500000, 0x8ca20000, 0, 0xafa20010, 0x8fa30010, 0x8ca20000, 0,
+			0x1462fff9, 0, 0x8fa20010, 0x3c030000, 0x8c630000, 0, 0x00431023, 0x04810005, 0x3051ffff,
+			0x3c020000, 0x8c420000, 0, 0 };
+		static const uint32_t ep[5] = { 0x8fbf0020, 0x8fb1001c, 0x8fb00018, 0x03e00008, 0x27bd0028 };
+		static const uint32_t rt[5] = { 0x00001021, 0x8fbf0018, 0x27bd0020, 0x03e00008, 0 };
+		if ((w[0] >> 26) == 0x03) {
+			for (i = 0; i < 20 && (w[i] & dm[i]) == dl[i]; i++) ;
+			if (i == 20) {
+				const uint32_t h = ((pc + 4) & 0xf0000000) | ((w[0] & 0x03ffffff) << 2);
+				const uint32_t *hw = is_ptr(h);
+				if (hw && (h & 0x1fffffff) < 0x800000 && (h & 0x1ffffc) <= 0x200000 - 0x140) {
+					int k;
+					for (k = 0; k < 21; k++) {
+						const uint32_t m = (k == 2) ? 0 : (k == 4 || k == 5 || k == 10 || k == 11) ? 0xffff0000 : ~0u;
+						if (k != 2 && (hw[k] & m) != hl[k]) break;
+					}
+					const uint32_t v = ((h + 12) & 0xf0000000) | ((hw[2] & 0x03ffffff) << 2);
+					const uint32_t *vw = is_ptr(v), *rw = hw + 20 + 0x38;   /* beqz at k=19: target = word 20 + 0x38 */
+					if (k == 21 && (hw[2] >> 26) == 0x03 && vw && (v & 0x1fffffff) < 0x800000 &&
+					    (v & 0x1ffffc) <= 0x200000 - 0x80 && !memcmp(rw, rt, sizeof rt)) {
+						for (k = 0; k < 28; k++) {
+							const uint32_t m = (k == 0 || k == 1 || k == 2 || k == 3 || k == 18 || k == 19 ||
+									    k == 24 || k == 25) ? 0xffff0000 : (k == 26) ? 0 : ~0u;
+							if (k != 26 && (vw[k] & m) != vl[k]) break;
+						}
+						const uint32_t e = ((v + 0x6c) & 0xf0000000) | ((vw[26] & 0x03ffffff) << 2);
+						const uint32_t *ew = is_ptr(e);
+						if (k == 28 && (vw[26] >> 26) == 0x02 && ew && (e & 0x1ffffc) <= 0x200000 - 20 &&
+						    !memcmp(ew, ep, sizeof ep)) {
+							aux[0] = h;
+							aux[1] = v;
+							return IS_D;
+						}
+					}
+				}
+			}
+		}
+	}
 	return IS_NONE;
 }
 
@@ -188,7 +251,7 @@ static void idleskip_init(void)
 
 static void idleskip_print(void)
 {
-	static const char *const nm[IS_N] = { "-", "V", "I", "A", "P", "R" };
+	static const char *const nm[IS_N] = { "-", "V", "I", "A", "P", "R", "D" };
 	for (int s = 1; s < IS_N; s++)
 		fprintf(stderr, "idleskip %s: blocks %lu calls %lu skips %lu iters %llu\n",
 			nm[s], is_blocks[s], is_calls[s], is_skips[s], is_iters[s]);
@@ -196,6 +259,9 @@ static void idleskip_print(void)
 }
 
 extern "C" void mipsrec_idleskip_report(void) { if (idleskip_on > 0) idleskip_print(); }
+
+/* D: the previous hook call (whole-real-iteration check) and the counter's address */
+static uint32_t d_pc, d_cycle, d_nexti, d_ctr;
 
 extern "C" uint64_t mipsrec_idle_entry(uint32_t pc, uint32_t ra)
 {
@@ -247,6 +313,49 @@ extern "C" uint64_t mipsrec_idle_entry(uint32_t pc, uint32_t ra)
 			return ret;
 		C = is_clk(2) + is_clk(8) + is_clk(15);   /* jal; T; return block to the beqz */
 		break; }
+	case IS_D: {
+		const uint32_t *w = is_ptr(pc), *hw = is_ptr(aux[0]), *vw = is_ptr(aux[1]);
+#define D_ADDR(hi, lo) (((hi) << 16) + (uint32_t)(int32_t)(int16_t)(lo))
+		const uint32_t *pc_chcr = is_ptr(D_ADDR(w[4], w[5])), *pc_gpu = is_ptr(D_ADDR(w[12], w[13]));
+		const uint32_t *pv_gpu = is_ptr(D_ADDR(vw[0], vw[1])), *pv_tim = is_ptr(D_ADDR(vw[2], vw[3]));
+		const uint32_t *dead = is_ptr(D_ADDR(hw[4], hw[5])), *vcnt = is_ptr(D_ADDR(vw[24], vw[25]));
+		d_ctr = D_ADDR(hw[10], hw[11]);
+		ctr = is_ptr(d_ctr);
+#undef D_ADDR
+		const uint32_t c0 = psxRegs.cycle;
+		const int consecutive = pc == d_pc && psxRegs.next_interupt == d_nexti;
+		const uint32_t prev = d_cycle;
+		d_pc = pc; d_cycle = c0; d_nexti = psxRegs.next_interupt;
+		if (!pc_chcr || !pc_gpu || !pv_gpu || !pv_tim || !dead || !vcnt || !ctr ||
+		    *pc_chcr != 0x1f8010a8 || *pc_gpu != 0x1f801814 || *pv_gpu != 0x1f801814 || *pv_tim != 0x1f801110)
+			return ret;
+		if ((int32_t)*dead < (int32_t)*vcnt)
+			return ret;                      /* the helper takes its timeout path */
+		const int idle = (int32_t)(psxRegs.gpuIdleAfter - c0) < 0;
+		if (psxHu32(0x10a8) & 0x01000000)
+			C = is_clk(2) + is_clk(4) + is_clk(28) + is_clk(5) + is_clk(17) + is_clk(5) + is_clk(10);
+		else if (!((psxHu32(0x1814) | (idle ? 0x04000000u : 0)) & 0x04000000))
+			C = is_clk(2) + is_clk(4) + is_clk(28) + is_clk(5) + is_clk(17) + is_clk(5) + is_clk(18);
+		else
+			return ret;                      /* leaves the loop */
+		if (!consecutive || c0 - prev != C)
+			return ret;                      /* not right after a whole real iteration */
+		/* inputs constant from the previous iteration's start through the skipped ones */
+		const uint32_t rate = rcnts[1].rate;
+		if (rate <= 1)
+			return ret;
+		const uint32_t tick = rcnts[1].cycleStart + ((prev - rcnts[1].cycleStart) / rate + 1) * rate;
+		int32_t lim = (int32_t)(tick - c0);
+		if ((int32_t)(psxRegs.gpuIdleAfter - prev) >= 0) {   /* busy at the previous iteration */
+			const int32_t g = (int32_t)(psxRegs.gpuIdleAfter - c0) + 1;   /* reads at c <= gpuIdleAfter */
+			if (g < lim) lim = g;
+		}
+		if (lim <= 0 || (int32_t)*ctr > 0xf0000)
+			return ret;
+		cap = (uint32_t)lim / C;             /* c0 + m*C <= tick / gpuIdleAfter + 1 */
+		if (0xf0000 - (int32_t)*ctr + 1 < (int32_t)cap)
+			cap = 0xf0000 - *ctr + 1;        /* old counts of the skipped iterations stay <= 0xf0000 */
+		break; }
 	default: {   /* IS_A */
 		const uint32_t *v = is_ptr(r[4] + 4);
 		if (!v || !((int32_t)*v < (int32_t)r[5]))
@@ -277,6 +386,12 @@ extern "C" uint64_t mipsrec_idle_entry(uint32_t pc, uint32_t ra)
 		break;
 	/* registers as the last skipped iteration leaves them: an IRQ inside the
 	 * crossing iteration makes the BIOS save them all to RAM */
+	case IS_D:
+		r[4] = *ctr + m - 1;                 /* a0 = the last skipped iteration's old count */
+		*ctr += m;
+		psxCpu->Clear(d_ctr & ~3u, 1);       /* as the guest stores would (SMC) */
+		d_cycle = psxRegs.cycle + m * C;     /* the next hook call is one real iteration later */
+		break;
 	case IS_P: {
 		const uint32_t *w = is_ptr(pc);
 		const uint32_t v1 = *is_ptr(r[28] + (uint32_t)(int32_t)(int16_t)w[0]);
