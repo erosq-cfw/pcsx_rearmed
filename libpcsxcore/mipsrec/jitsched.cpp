@@ -439,6 +439,88 @@ extern "C" uint64_t mipsrec_tty_entry(uint32_t pc, uint32_t ra)
 	return ((uint64_t)ra << 32) | pc;
 }
 #endif
+/* EROSQ_GTENF (2026-10-22, default off): a GTE command whose FLAG result can
+ * never be read gets the flagless handler (gteGetHandler_nf, the same bodies
+ * ari64 uses; data results are identical). FLAG is read only by cfc2 $31, and
+ * every GTE command (and ctc2 $31) overwrites it. gtenf_dead() walks the guest
+ * code after the command: straight-line, both paths of each branch (its delay
+ * slot first), into jal callees. A path is dead when it reaches a GTE command
+ * or ctc2 $31 first, live at cfc2 $31. jr/jalr/syscall/break, a return from a
+ * callee, running out of budget or unmapped code all count as live, so the
+ * flagless handler is only used where no path can read the FLAG. Census
+ * (interpreter, 10-22): provably dead GT2 43%, Crash 19%, Spyro 14% of GTE
+ * commands. */
+static int gtenf_on = -1;
+static uint32_t gtenf_hi;   /* RAM end of the code walked for the block being compiled (bx_block widens its extent) */
+static unsigned long gtenf_n, gtenf_nf;
+/* SMC: the walk only reads RAM at or after the block's start (or ROM from a ROM
+ * block), and bx_block registers the block's extent up to the highest word it
+ * read, so a Clear() of any word the decision relied on recompiles the block */
+static uint32_t gtenf_word(uint32_t a, int *ok)
+{
+	const uint32_t pa = a & 0x1fffffff, ps = psxRegs.pc & 0x1fffffff;
+	const int ram = pa < 0x800000, ram_blk = ps < 0x800000;
+	const void *p = psxm(a, 0);
+	*ok = p != INVALID_PTR && ram == ram_blk && (!ram || ((pa & 0x1ffffc) >= (ps & 0x1ffffc)
+	      && (pa & 0x1ffffc) - (ps & 0x1ffffc) < 0x10000));
+	if (*ok && ram && (pa & 0x1ffffc) + 4 > gtenf_hi)
+		gtenf_hi = (pa & 0x1ffffc) + 4;
+	return *ok ? *(const uint32_t *)p : 0;
+}
+static int gtenf_cls(uint32_t w)   /* 1 = FLAG overwritten, -1 = FLAG read, 0 = neither */
+{
+	const uint32_t op = w >> 26, rs = (w >> 21) & 31, rd = (w >> 11) & 31;
+	if (op != 0x12) return 0;
+	if (rs & 0x10) return 1;
+	if (rd == 31 && rs == 6) return 1;
+	if (rd == 31 && rs == 2) return -1;
+	return 0;
+}
+/* 1 = every path from pc overwrites FLAG before reading it */
+static int gtenf_dead(uint32_t pc, int *budget, int depth)
+{
+	for (;;) {
+		int ok, c;
+		if (--*budget < 0 || depth > 12) return 0;
+		const uint32_t w = gtenf_word(pc, &ok), op = w >> 26, fn = w & 63;
+		if (!ok) return 0;
+		if ((c = gtenf_cls(w))) return c > 0;
+		if (op == 0 && (fn == 8 || fn == 9 || fn == 0x0c || fn == 0x0d)) return 0;
+		const int is_j = op == 2 || op == 3, is_b = op == 1 || (op >= 4 && op <= 7);
+		if (is_j || is_b) {
+			const uint32_t ds = gtenf_word(pc + 4, &ok);
+			if (!ok) return 0;
+			if ((c = gtenf_cls(ds))) return c > 0;
+			if (op == 0 && ((ds & 63) == 8 || (ds & 63) == 9)) return 0;
+			if (is_b) {
+				if (!gtenf_dead(pc + 4 + ((uint32_t)(int32_t)(int16_t)w << 2), budget, depth + 1))
+					return 0;
+				pc += 8;
+				continue;
+			}
+			const uint32_t t = ((pc + 4) & 0xf0000000) | ((w & 0x03ffffff) << 2);
+			if (op == 3)
+				return gtenf_dead(t, budget, depth + 1);   /* the callee must settle it: its return is unknown */
+			pc = t;
+			continue;
+		}
+		pc += 4;
+	}
+}
+extern "C" int mipsrec_gte_flag_dead(uint32_t next_pc, int in_delay_slot)
+{
+	if (gtenf_on < 0) {
+		const char *e = getenv("EROSQ_GTENF");
+		gtenf_on = e ? atoi(e) : 0;
+	}
+	int budget = 400;
+	if (gtenf_on <= 0 || in_delay_slot)
+		return 0;
+	const int d = gtenf_dead(next_pc, &budget, 0);
+	if (gtenf_on > 1 && (++gtenf_n, gtenf_nf += d, (gtenf_n & 0x7f) == 0))   /* EROSQ_GTENF=2: compile-time stat */
+		fprintf(stderr, "gtenf: %lu of %lu compiled GTE commands flagless\n", gtenf_nf, gtenf_n);
+	return d;
+}
 
 extern u32 *recMem;   /* recompiler.cpp: next emitted word */
 
@@ -1417,7 +1499,11 @@ static void bx_block(uint32_t *host, uint32_t guest)
 	ee_index(host, pc);
 	if ((pc & 0x1fffffff) >= 0x800000 || !guest || guest > 0x10000)   /* RAM (+mirrors) only */
 		return;
-	const uint32_t s = pc & 0x1ffffc, e = s + guest * 4;
+	const uint32_t s = pc & 0x1ffffc;
+	uint32_t e = s + guest * 4;
+	if (gtenf_hi > e)   /* EROSQ_GTENF read code past the block's end */
+		e = gtenf_hi;
+	gtenf_hi = 0;
 	if (e > 0x200000)
 		return;
 	bx_register(s, e);

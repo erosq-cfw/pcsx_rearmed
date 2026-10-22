@@ -39,6 +39,7 @@ GTE_BAKED_DECL(CC)    GTE_BAKED_DECL(NCS)   GTE_BAKED_DECL(NCT)
 GTE_BAKED_DECL(DPCT)  GTE_BAKED_DECL(AVSZ3) GTE_BAKED_DECL(AVSZ4)
 GTE_BAKED_DECL(RTPT)  GTE_BAKED_DECL(NCCT)
 #undef GTE_BAKED_DECL
+int mipsrec_gte_flag_dead(u32 next_pc, int in_delay_slot);   /* jitsched.cpp: EROSQ_GTENF */
 }
 
 /* Emit code to call a GTE func that takes no arguments */
@@ -47,8 +48,13 @@ extern void gte##f(); \
 void rec##f() \
 { \
 	if (gte_h_##f) { \
+		gte_handler *h__ = gte_h_##f; \
+		if (mipsrec_gte_flag_dead(pc, branch)) { /* EROSQ_GTENF */ \
+			gte_handler *nf__ = gteGetHandler_nf(gte_code_##f); \
+			if (nf__) h__ = nf__; \
+		} \
 		LI32(MIPSREG_A1, gte_code_##f); \
-		JAL((u32)gte_h_##f); \
+		JAL((u32)h__); \
 		ADDIU(MIPSREG_A0, PERM_REG_1, off(CP2)); /* <BD> a0 = &psxRegs.CP2 */ \
 	} else { \
 		JAL(gte##f); \
@@ -72,6 +78,10 @@ void rec##f() \
 { \
 	const u32 gteword__ = (u32)(GTEOP_##f) | (((psxRegs.code >> 10) & 0xffffu) << 10); \
 	gte_handler *gtehnd__ = gteGetHandler(gteword__); \
+	if (gtehnd__ && mipsrec_gte_flag_dead(pc, branch)) { /* EROSQ_GTENF */ \
+		gte_handler *nf__ = gteGetHandler_nf(gteword__); \
+		if (nf__) gtehnd__ = nf__; \
+	} \
 	if (gtehnd__) { \
 		LI32(MIPSREG_A1, gteword__); \
 		JAL((u32)gtehnd__); \
