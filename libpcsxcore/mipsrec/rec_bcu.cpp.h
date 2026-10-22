@@ -449,10 +449,53 @@ static void iJumpAL(u32 bpc, u32 nbpc)
 }
 
 /* Used for BLTZ, BGTZ, BLTZAL, BGEZAL, BLEZ, BGEZ */
+/* EROSQ load delay, not-taken path (2026-10-22; Tekken 3:
+ * `beq t0,zero,L; mfc2 t0,MAC0 <BD>; bgtz t0`). A delayed load (lb..lwr,
+ * mfc0/mfc2/cfc2) in a conditional branch's delay slot commits one
+ * instruction late: on hardware the fall-through's first instruction still
+ * reads the old rt. That reader is the next guest word, so on the not-taken
+ * path only, the block ends there: the old value (saved before the delay
+ * slot ran) and the pending new one go to mipsrec_ldhaz_ft, which interprets
+ * from the fall-through with the load still pending. The taken path and every
+ * other branch are emitted as before. EROSQ_LDHAZ_JIT=0 disables it. */
+extern "C" u32 mipsrec_ldhaz_old;
+extern "C" u32 mipsrec_ldhaz_ft(u32 ftpc, u32 r);
+extern "C" int mipsrec_ldhaz_ft_hazard(u32 ds, u32 ft);
+
+/* before the delay slot (pc) is emitted: its rt when the fall-through reads
+ * it (0 = no hazard), with the old value saved */
+static u32 ldhaz_ft_begin(void)
+{
+	const u32 ds = OPCODE_AT(pc);
+	if (!mipsrec_ldhaz_ft_hazard(ds, OPCODE_AT(pc + 4)))
+		return 0;
+	const u32 r = _fRt_(ds);
+	const u32 h = regMipsToHost(r, REG_LOAD, REG_REGISTER);
+	LUI(TEMP_1, ADR_HI(&mipsrec_ldhaz_old));
+	SW(h, TEMP_1, ADR_LO(&mipsrec_ldhaz_old));
+	regUnlock(h);
+	return r;
+}
+
+/* not-taken path, delay slot done, pc = the fall-through: end the block in
+ * the interpreter */
+static void ldhaz_ft_end(u32 r)
+{
+	regClearJump();
+	LI32(MIPSREG_A0, pc);
+	JAL(mipsrec_ldhaz_ft);                 /* v0 = next pc (cycles charged) */
+	LI16(MIPSREG_A1, r);                   /* <BD> */
+	rec_recompile_end_part1();
+	rec_recompile_end_part2(false);
+	end_block = 1;
+}
+
 static void emitBxxZ(int andlink, u32 bpc, u32 nbpc)
 {
 	const u32 code = psxRegs.code;
 	const int dt = DelayTest(pc, bpc);
+	/* EROSQ load delay: the fall-through reads the delay slot's load */
+	const u32 ldft = (dt == 3 || dt == 0) ? ldhaz_ft_begin() : 0;
 
 #ifdef USE_CONST_BRANCH_OPTIMIZATIONS
 	// If test register is known-const, we can eliminate the branch:
@@ -461,7 +504,7 @@ static void emitBxxZ(int andlink, u32 bpc, u32 nbpc)
 
 	// Only do const-propagated branch shortcuts if no delay-slot
 	//  trickery is detected.
-	if (IsConst(_Rs_) && ((dt == 3) || dt == 0))
+	if (IsConst(_Rs_) && ((dt == 3) || dt == 0) && !ldft)
 	{
 		// MIPS branch decisions are made before execution of delay slots.
 		// Do the same here: the delay slot could write to decision regs!
@@ -513,7 +556,7 @@ static void emitBxxZ(int andlink, u32 bpc, u32 nbpc)
 	// Attempt to convert the branch to conditional move(s).
 	// IMPORTANT: There must be no delay-slot trickery, and branch must
 	//            not be a 'bgezal,bltzal' branch-and-link instruction.
-	if (!andlink && (dt == 3 || dt == 0))
+	if (!andlink && (dt == 3 || dt == 0) && !ldft)
 	{
 		if (convertBranchToConditionalMoves())
 			return;
@@ -642,6 +685,8 @@ static void emitBxxZ(int andlink, u32 bpc, u32 nbpc)
 
 	if (dt != 3 && dt != 0)
 		recDelaySlot();
+	else if (ldft)
+		ldhaz_ft_end(ldft);
 }
 
 /* Used for BEQ and BNE */
@@ -651,6 +696,8 @@ static void emitBxx(u32 bpc)
 #ifdef LOG_BRANCHLOADDELAYS
 	const u32 dt = DelayTest(pc, bpc);
 #endif
+	/* EROSQ load delay: the fall-through reads the delay slot's load */
+	const u32 ldft = ldhaz_ft_begin();
 
 	// XXX - If delay-slot trickery workarounds are ever added to this
 	//       emitter, as emitBxxZ() already has, be sure to disallow
@@ -661,7 +708,7 @@ static void emitBxx(u32 bpc)
 	//  If taken, block will end here.
 	//  If not taken, we skip over it and continue emitting at delay slot.
 
-	if (IsConst(_Rs_) && IsConst(_Rt_))
+	if (IsConst(_Rs_) && IsConst(_Rt_) && !ldft)
 	{
 		// MIPS branch decisions are made before execution of delay slots.
 		// Do the same here: the delay slot could write to decision regs!
@@ -694,7 +741,7 @@ static void emitBxx(u32 bpc)
 
 #ifdef USE_CONDITIONAL_MOVE_OPTIMIZATIONS
 	// Attempt to convert the branch to conditional move(s).
-	if (convertBranchToConditionalMoves())
+	if (!ldft && convertBranchToConditionalMoves())
 		return;
 #endif // USE_CONDITIONAL_MOVE_OPTIMIZATIONS
 
@@ -760,6 +807,8 @@ static void emitBxx(u32 bpc)
 	fixup_branch(backpatch);
 	regUnlock(br1);
 	regUnlock(br2);
+	if (ldft)
+		ldhaz_ft_end(ldft);
 }
 
 static void recBLTZ()

@@ -305,6 +305,19 @@ static int ldhaz_block(uint32_t pc)
 	return ldhaz_mode && ldhaz_scan(pc);
 }
 
+/* rec_bcu.cpp.h emitBxx/emitBxxZ: the not-taken fall-through of a
+ * conditional branch reads the load in its delay slot (EROSQ_LDHAZ_JIT,
+ * default on; 0 disables) */
+static int ldhaz_jit = -1;
+extern "C" int mipsrec_ldhaz_ft_hazard(uint32_t ds, uint32_t ft)
+{
+	if (ldhaz_jit < 0) {
+		const char *e = getenv("EROSQ_LDHAZ_JIT");
+		ldhaz_jit = e ? atoi(e) : 1;
+	}
+	return ldhaz_jit && ldhaz_is_load(ds) && ldhaz_pair(ds, ft);
+}
+
 /* lui a0,hi(pc); jal mipsrec_ldhaz_run; ori a0,lo(pc) <BD>; j loop; move v1,zero <BD> */
 static void ldhaz_emit(uint32_t pc)
 {
@@ -416,6 +429,20 @@ extern "C" uint32_t mipsrec_cio_run(void)
  * while a load is still pending at a block end (a load in the delay slot),
  * so the target's first instruction also sees the old value. Then flush
  * (mipsrec has no delay state), as mipsrec_cio_run does. */
+/* the fall-through at ftpc runs with r's load pending: GPR r holds the old
+ * value (saved by the block before its delay slot), the new one commits after
+ * the next instruction, as the interpreter's doLoad leaves it */
+extern "C" { uint32_t mipsrec_ldhaz_old; unsigned long mipsrec_ldhaz_ft_runs; }
+extern "C" uint32_t mipsrec_ldhaz_ft(uint32_t ftpc, uint32_t r)
+{
+	mipsrec_ldhaz_ft_runs++;
+	const int sel = psxRegs.dloadSel ^ 1;
+	psxRegs.dloadReg[sel] = r;
+	psxRegs.dloadVal[sel] = psxRegs.GPR.r[r];
+	psxRegs.GPR.r[r] = mipsrec_ldhaz_old;
+	return mipsrec_ldhaz_run(ftpc);
+}
+
 extern "C" uint32_t mipsrec_ldhaz_run(uint32_t pc)
 {
 	mipsrec_ldhaz_runs++;
@@ -1026,7 +1053,7 @@ chain:
 static void ua_report(void)
 {
 	fprintf(stderr, "unaligned: host %lu jit %lu undecoded %lu\n", ua_host, ua_jit, ua_bad);
-	fprintf(stderr, "ldhaz: %lu blocks interpreted, %lu runs\n", mipsrec_ldhaz_blocks, mipsrec_ldhaz_runs);
+	fprintf(stderr, "ldhaz: %lu blocks interpreted, %lu runs (%lu fall-through)\n", mipsrec_ldhaz_blocks, mipsrec_ldhaz_runs, mipsrec_ldhaz_ft_runs);
 	fprintf(stderr, "unaligned: exact %lu (overflow %lu; %lu trapping add/sub compiled) fallback %lu index-peak %u blocks; emulated %lu hoisted %lu (why io %lu cmp %lu acc %lu alu %lu hoist %lu bios %lu chk %lu)\n",
 		ee_exact_n, ee_ovf_n, mipsrec_ovf_sites, ee_fb_n, ee_peak, ee_emul, ee_hoist, ee_why[0], ee_why[1], ee_why[2], ee_why[3], ee_why[4], ee_why[5], ee_why[6]);
 }
