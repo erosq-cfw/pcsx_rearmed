@@ -332,9 +332,17 @@ static void gm_dump(unsigned long nframes)
 			(double)gm_px[i] / nframes, tp ? 100.0 * gm_px[i] / tp : 0, gm_n[i] ? (double)gm_px[i] / gm_n[i] : 0);
 }
 
+static void cyc_hook(psxCP0Regs *cp0);   /* HX_CYCLES, below */
+static unsigned long long cyc_budget;
+extern void (*mipsrec_irq_test_hook)(psxCP0Regs *cp0) __attribute__((weak));
+
 void plat_init(void)
 {
 	{ struct sigaction sa; memset(&sa, 0, sizeof sa); sa.sa_sigaction = trap; sa.sa_flags = SA_SIGINFO; sigaction(SIGTRAP, &sa, 0); sigaction(SIGBUS, &sa, 0); }
+	if (getenv("HX_CYCLES") && &mipsrec_irq_test_hook) {
+		cyc_budget = strtoull(getenv("HX_CYCLES"), 0, 0);
+		mipsrec_irq_test_hook = cyc_hook;
+	}
 	if (getenv("HX_WATCH")) { signal(SIGALRM, watch); alarm(strtoul(getenv("HX_WATCH"), 0, 0)); }
 	{	/* qemu-user enforces NX; the JIT code cache (recMemBase) is BSS */
 		uintptr_t lo = (uintptr_t)__bss_start & ~4095u, hi = ((uintptr_t)_end + 4095) & ~4095u;
@@ -380,6 +388,33 @@ static void hash_line(const char *tag)
 	for (int i = 0; i < 1024 * 512; i++) v = (v ^ gpu.vram[i]) * 16777619u;
 	fprintf(stderr, "[hx] %s %lu ram+gpr=%08x frame=%08x vram=%08x cycle=%08x pc=%08x\n",
 		tag, frames, h, f, v, psxRegs.cycle, psxRegs.pc);
+}
+
+/* HX_CYCLES=N: stop after N emulated cycles (u64, wrap-safe), checked at the
+ * dispatcher's event test -- a deterministic end for programs that rarely or
+ * never flip (test ROMs on a static screen); prints the same "end" line. */
+extern void (*mipsrec_irq_test_hook)(psxCP0Regs *cp0) __attribute__((weak));
+void gen_interupt(psxCP0Regs *cp0);
+static unsigned long long cyc_budget, cyc_used;
+static u32 cyc_last;
+static int cyc_started;
+static void cyc_hook(psxCP0Regs *cp0)
+{
+	gen_interupt(cp0);
+	if (!cyc_started) { cyc_started = 1; cyc_last = psxRegs.cycle; return; }
+	cyc_used += (u32)(psxRegs.cycle - cyc_last);
+	cyc_last = psxRegs.cycle;
+	if (cyc_used < cyc_budget)
+		return;
+	hash_line("end");
+	if (getenv("HX_VRAMOUT")) {
+		FILE *vf = fopen(getenv("HX_VRAMOUT"), "wb");
+		if (vf) { fwrite(gpu.vram, 2, 1024 * 512, vf); fclose(vf); }
+	}
+	if (mipsrec_idleskip_report) mipsrec_idleskip_report();
+	fprintf(stderr, "[hx] done after %llu cycles (%lu frames)\n", cyc_used, frames);
+	fflush(NULL);
+	_exit(0);
 }
 
 void *plat_gvideo_flip(void)
