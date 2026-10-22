@@ -1082,32 +1082,9 @@ static void ua_install(void)
 		sa.sa_sigaction = ee_sigfpe;
 		sigaction(SIGFPE, &sa, &ee_prev_fpe);
 	}
+	syscall(__NR_sysmips, 7 /* MIPS_FIXADE */, 0, 0);   /* this (emu) thread only; ENOSYS under qemu-user (SIGBUS there anyway) */
 	if (getenv("EROSQ_PROF"))
 		atexit(ua_report);
-}
-
-/* FIXADE is per thread: recExecute calls this on every entry, so whichever
- * thread runs the dispatch loop has it off (one syscall per new thread).
- * EROSQ_PROF also reports whether an unaligned host load really traps here
- * (the dispatch loop no longer depends on it for misaligned guest pcs). */
-static long fx_tid = -1;
-extern "C" void mipsrec_fixade_arm(void)
-{
-	if (!jitsched_inited)
-		jitsched_init();   /* installs ua_sigbus first */
-	const long tid = syscall(__NR_gettid);
-	if (tid == fx_tid)
-		return;
-	fx_tid = tid;
-	const long rc = syscall(__NR_sysmips, 7 /* MIPS_FIXADE */, 0, 0);   /* ENOSYS under qemu-user (SIGBUS there anyway) */
-	if (getenv("EROSQ_PROF")) {
-		static unsigned char tb[8] __attribute__((aligned(4))) = { 1, 2, 3, 4, 5, 6, 7, 8 };
-		unsigned char *volatile q = tb + 1;
-		const unsigned long h0 = ua_host;
-		(void)*(volatile uint32_t *)q;
-		fprintf(stderr, "mipsrec: FIXADE off tid %ld rc %ld: unaligned host load %s\n",
-			tid, rc, *(volatile unsigned long *)&ua_host != h0 ? "traps" : "does NOT trap (kernel fixup)");
-	}
 }
 
 extern "C" void mipsrec_unaligned_stats(unsigned long *host, unsigned long *jit, unsigned long *bad) { *host = ua_host; *jit = ua_jit; *bad = ua_bad; }
