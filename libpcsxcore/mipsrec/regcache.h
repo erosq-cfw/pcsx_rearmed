@@ -203,6 +203,8 @@ static u32 regMipsToHostHelper(u32 regpsx, u32 action, u32 type)
 	regcache.host[regnum].host_type = type;
 	regcache.host[regnum].host_islocked++;
 	regcache.psx[regpsx].psx_ischanged = false;
+	if (__builtin_expect(mipsrec_dry_on, 0))   /* exact-exception dry run */
+		dry_fresh = action == REG_FIND ? dry_fresh | 1u << regpsx : dry_fresh & ~(1u << regpsx);
 
 	if (action != REG_LOADBRANCH) {
 		regcache.host[regnum].host_age = 0;
@@ -292,6 +294,7 @@ static void regMipsChanged(u32 regpsx)
 		return;
 
 	regcache.psx[regpsx].psx_ischanged = true;
+	dry_fresh &= ~(1u << regpsx);
 
 	/* A cached converted address derived from this reg is now stale. */
 	lsu_note_guest_reg_write(regpsx);
@@ -322,6 +325,7 @@ static void regClearBranch(void)
 static void regReset()
 {
 	int i, i2;
+	dry_fresh = 0;
 	for (i = 0; i < 32; i++) {
 		regcache.psx[i].psx_ischanged = false;
 		regcache.psx[i].ismapped = false;

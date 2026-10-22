@@ -613,12 +613,14 @@ char	disasm_buffer[512];
 static void lsu_note_guest_reg_write(u32 regpsx);
 
 #include "emitstat.h"
-#include "regcache.h"
-
 /* EROSQ exact AdEL/AdES (exactexc.h): in the dry-run child only, LSU_OPCODE
  * records each emitted guest access. Kept in .jitsched_text so recompiler
- * .text grows only by the call-site test. */
+ * .text grows only by the call-site test. dry_fresh: guest regs whose host
+ * reg was allocated REG_FIND (not loaded) and not yet written -- at the
+ * access their value is still the one in psxRegs (regcache.h keeps it). */
 #include "exactexc.h"
+static u32 dry_fresh;
+#include "regcache.h"
 __attribute__((noinline, section(".jitsched_text")))
 static void dry_note(u32 gpc)
 {
@@ -629,7 +631,7 @@ static void dry_note(u32 gpc)
 	a->gpc = gpc;
 	a->cmask = 0;
 	for (int r = 0; r < 32; r++) {
-		a->map[r] = regcache.psx[r].ismapped ? 0x80 | regcache.psx[r].mappedto : 0;
+		a->map[r] = regcache.psx[r].ismapped && !(dry_fresh >> r & 1) ? 0x80 | regcache.psx[r].mappedto : 0;
 		if (iRegs[r].is_const) { a->cmask |= 1u << r; a->cval[r] = iRegs[r].constval; }
 	}
 }
