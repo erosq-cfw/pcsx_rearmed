@@ -373,6 +373,7 @@ static size_t recmem_max = 4u << 20;
 static u8 recMemBase[RECMEM_SIZE] __attribute__((aligned(4)));
 int jitsched_tail(u32 *start, u32 *end, int es, unsigned long long *es_blocks,   /* jitsched.cpp */
 		  unsigned long long *es_block_bytes, unsigned long long *es_block_guest, u32 bytes, u32 guest);
+extern "C" void mipsrec_entry_room(u32 pc);   /* jitsched.cpp: advances recMem past the block-entry room (IDLESKIP) */
 
 u32        *recMem;                /* Where does next emitted opcode in block go? */
 
@@ -1112,7 +1113,7 @@ extern "C" void mipsrec_faultmem_stats(unsigned long *faults, unsigned long *slo
  * read ~0.5% slower). A new function in this TU would add an .eh_frame FDE,
  * which moves .plt. */
 #ifndef JITSCHED_RECOMPILE_PAD
-#define JITSCHED_RECOMPILE_PAD "9"   /* (2840 - unpadded size) / 4: re-derive after ANY recompiler.cpp change */
+#define JITSCHED_RECOMPILE_PAD "4"   /* (2840 - unpadded size) / 4: re-derive after ANY recompiler.cpp change */
 #endif
 
 static void recRecompile()
@@ -1193,6 +1194,8 @@ static void recRecompile()
 
 	u8 *es_blk0 = (u8 *)recMem;
 	const u32 es_pc0 = pc;
+	/* EROSQ_IDLESKIP: room jitsched_tail fills with the idle-entry call */
+	mipsrec_entry_room(pc);
 	rec_preload_regs(pc);
 	if (emitstat_enabled()) es_prologue += (u8 *)recMem - es_blk0;
 

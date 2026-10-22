@@ -39,6 +39,7 @@ void psxRcntInit(void);
 /* exported by the blocklink build; weak until then */
 extern u32 mipsrec_link_taken __attribute__((weak));
 extern u32 cycle_multiplier;
+void mipsrec_idleskip_report(void) __attribute__((weak));
 
 #define CODE  0x80010000u
 #define SENT  0x80020000u
@@ -165,6 +166,7 @@ int main(int argc, char **argv)
 	static const char *er[] = { "running", "done", "stopped", "cap" };
 	printf("STATE gpr=%08x ram=%08x cycle=%08x pc=%08x horizons=%lu link_taken=%s end=%s\n",
 	       g, r, psxRegs.cycle, psxRegs.pc, horizons, lt, er[end_reason]);
+	if (mipsrec_idleskip_report) mipsrec_idleskip_report();   /* stderr; off: prints nothing */
 	if (getenv("HX_REGS"))
 		for (int i = 0; i < 34; i++) printf("  r%d=%08x\n", i, psxRegs.GPR.r[i]);
 	return 0;

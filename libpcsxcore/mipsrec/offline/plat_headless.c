@@ -41,6 +41,7 @@ static void js_print(const char *at)
 void mipsrec_emitstat_dump(void) __attribute__((weak));
 void mipsrec_rec_reset(void) __attribute__((weak));
 void mipsrec_debug_regions(uintptr_t *v) __attribute__((weak));
+void mipsrec_idleskip_report(void) __attribute__((weak));
 
 int g_prof_on;
 unsigned long long g_prof_gpu_ns, g_prof_present_ns, g_prof_spu_ns;
@@ -333,7 +334,7 @@ static void gm_dump(unsigned long nframes)
 
 void plat_init(void)
 {
-	{ struct sigaction sa; memset(&sa, 0, sizeof sa); sa.sa_sigaction = trap; sa.sa_flags = SA_SIGINFO; sigaction(SIGTRAP, &sa, 0); }
+	{ struct sigaction sa; memset(&sa, 0, sizeof sa); sa.sa_sigaction = trap; sa.sa_flags = SA_SIGINFO; sigaction(SIGTRAP, &sa, 0); sigaction(SIGBUS, &sa, 0); }
 	if (getenv("HX_WATCH")) { signal(SIGALRM, watch); alarm(strtoul(getenv("HX_WATCH"), 0, 0)); }
 	{	/* qemu-user enforces NX; the JIT code cache (recMemBase) is BSS */
 		uintptr_t lo = (uintptr_t)__bss_start & ~4095u, hi = ((uintptr_t)_end + 4095) & ~4095u;
@@ -367,10 +368,29 @@ static void dump_ppm(const char *path)
 	fclose(f);
 }
 
+/* HX_HASH_EVERY=N: every N flips, one line hashing guest RAM + GPRs, the
+ * flipped frame, VRAM and psxRegs.cycle/pc -- differential runs (e.g.
+ * EROSQ_IDLESKIP off vs on) must print identical lines. No file is written. */
+static void hash_line(const char *tag)
+{
+	uint32_t h = 2166136261u, f = 2166136261u, v = 2166136261u;
+	for (int i = 0; i < 0x200000; i++) h = (h ^ psxRegs.ptrs.psxM[i]) * 16777619u;
+	for (int i = 0; i < 34; i++) h = (h ^ psxRegs.GPR.r[i]) * 16777619u;
+	for (int i = 0; i < psx_w * psx_h; i++) f = (f ^ fb[i]) * 16777619u;
+	for (int i = 0; i < 1024 * 512; i++) v = (v ^ gpu.vram[i]) * 16777619u;
+	fprintf(stderr, "[hx] %s %lu ram+gpr=%08x frame=%08x vram=%08x cycle=%08x pc=%08x\n",
+		tag, frames, h, f, v, psxRegs.cycle, psxRegs.pc);
+}
+
 void *plat_gvideo_flip(void)
 {
 	char path[512];
 	frames++;
+	{
+		static unsigned long every = (unsigned long)-1;
+		if (every == (unsigned long)-1) every = getenv("HX_HASH_EVERY") ? strtoul(getenv("HX_HASH_EVERY"), 0, 0) : 0;
+		if (every && frames % every == 0) hash_line("hash");
+	}
 	if (frames % 60 == 0) fprintf(stderr, "[hx] frame %lu %dx%d\n", frames, psx_w, psx_h);
 	if (getenv("HX_SHOT_EVERY") && frames % strtoul(getenv("HX_SHOT_EVERY"), 0, 0) == 0) {
 		snprintf(path, sizeof path, "%s.f%06lu.ppm", out, frames); dump_ppm(path);
@@ -429,7 +449,7 @@ void *plat_gvideo_flip(void)
 	if (frames >= max_frames) {
 		if (getenv("HX_DCMARK")) syscall(SYS_getppid);   /* close the dcmodel window */
 		js_print("end");
-		snprintf(path, sizeof path, "%s.ppm", out); dump_ppm(path);
+		if (!getenv("HX_NODUMP")) { snprintf(path, sizeof path, "%s.ppm", out); dump_ppm(path); }
 		if (mipsrec_blkprof_dump) { snprintf(path, sizeof path, "%s.blk", out); mipsrec_blkprof_dump(path); }
 		if (mipsrec_emitstat_dump && getenv("EROSQ_EMITSTAT")) mipsrec_emitstat_dump();
 		if (gm_on) gm_dump(frames - mark_frame);
@@ -439,9 +459,17 @@ void *plat_gvideo_flip(void)
 			for (int i = 0; i < 0x200000; i++) h = (h ^ psxRegs.ptrs.psxM[i]) * 16777619u;
 			for (int i = 0; i < 34; i++) h = (h ^ psxRegs.GPR.r[i]) * 16777619u;
 			fprintf(stderr, "[hx] state ram+gpr=%08x cycle=%08x pc=%08x\n", h, psxRegs.cycle, psxRegs.pc);
-			snprintf(path, sizeof path, "%s.ram", out);   /* guest code for gt2_an.py */
-			FILE *rf = fopen(path, "wb");
-			if (rf) { fwrite(psxRegs.ptrs.psxM, 1, 0x200000, rf); fclose(rf); }
+			if (!getenv("HX_NODUMP")) {   /* HX_NODUMP=1: no RAM/frame files (disc-derived data) */
+				snprintf(path, sizeof path, "%s.ram", out);   /* guest code for gt2_an.py */
+				FILE *rf = fopen(path, "wb");
+				if (rf) { fwrite(psxRegs.ptrs.psxM, 1, 0x200000, rf); fclose(rf); }
+			}
+			hash_line("end");
+			if (getenv("HX_VRAMOUT")) {   /* raw 1024x512x16 VRAM (test-ROM runs: vs reference vram.png) */
+				FILE *vf = fopen(getenv("HX_VRAMOUT"), "wb");
+				if (vf) { fwrite(gpu.vram, 2, 1024 * 512, vf); fclose(vf); }
+			}
+			if (mipsrec_idleskip_report) mipsrec_idleskip_report();
 		}
 		fprintf(stderr, "[hx] done after %lu frames\n", frames);
 		fflush(NULL);
