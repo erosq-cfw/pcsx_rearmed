@@ -309,6 +309,18 @@ u32 psxHwRead32(u32 add) {
 }
 
 void psxHwWrite8(u32 add, u32 value) {
+	/* EROSQ (ps1-tests cpu/io-access-bitwidth, hw psx.log): the CPU drives
+	 * the whole rt onto the bus for sb, and the 32-bit IRQ/DMA registers
+	 * and the 16-bit timers latch it as a full-width write. Callers pass
+	 * the full rt (interpreter and mipsrec alike). */
+	if (!(add & 3) && (add & 0xffff) >= 0x1070 && (add & 0xffff) < 0x1100) {
+		psxHwWrite32(add, value);
+		return;
+	}
+	if (!(add & 3) && (add & 0xffff) >= 0x1100 && (add & 0xffff) < 0x1130 && (add & 0xf) <= 8) {
+		psxHwWrite16(add, value);
+		return;
+	}
 	switch (add & 0xffff) {
 	case 0x1040: sioWrite8(value); return;
 	case 0x10f6:
@@ -343,15 +355,15 @@ void psxHwWrite16(u32 add, u32 value) {
 	case 0x104e: sioWriteBaud16(value); return;
 	case 0x1070: psxHwWriteIstat(value); return;
 	case 0x1074: psxHwWriteImask(value); return;
-	case 0x1100: psxRcntWcount(0, value); return;
-	case 0x1104: psxRcntWmode(0, value); return;
-	case 0x1108: psxRcntWtarget(0, value); return;
-	case 0x1110: psxRcntWcount(1, value); return;
-	case 0x1114: psxRcntWmode(1, value); return;
-	case 0x1118: psxRcntWtarget(1, value); return;
-	case 0x1120: psxRcntWcount(2, value); return;
-	case 0x1124: psxRcntWmode(2, value); return;
-	case 0x1128: psxRcntWtarget(2, value); return;
+	case 0x1100: psxRcntWcount(0, value & 0xffff); return;
+	case 0x1104: psxRcntWmode(0, value & 0xffff); return;
+	case 0x1108: psxRcntWtarget(0, value & 0xffff); return;
+	case 0x1110: psxRcntWcount(1, value & 0xffff); return;
+	case 0x1114: psxRcntWmode(1, value & 0xffff); return;
+	case 0x1118: psxRcntWtarget(1, value & 0xffff); return;
+	case 0x1120: psxRcntWcount(2, value & 0xffff); return;
+	case 0x1124: psxRcntWmode(2, value & 0xffff); return;
+	case 0x1128: psxRcntWtarget(2, value & 0xffff); return;
 
 	// forced write32:
 	case 0x1088: // DMA0 chcr (MDEC in DMA)
@@ -370,8 +382,6 @@ void psxHwWrite16(u32 add, u32 value) {
 	case 0x10f4: psxHwWriteDmaIcr32(value); return;
 
 	// forced write32 with no immediate effect:
-	case 0x1014:
-	case 0x1060:
 	case 0x1080:
 	case 0x1090:
 	case 0x10a0:
@@ -379,6 +389,10 @@ void psxHwWrite16(u32 add, u32 value) {
 	case 0x10c0:
 	case 0x10d0:
 	case 0x10e0:
+		value &= 0xffffff;   /* MADR: 24 bits (hw: 0x12345678 reads 0x345678) */
+		/* fallthrough */
+	case 0x1014:
+	case 0x1060:
 		psxHu32ref(add) = SWAPu32(value);
 		return;
 
@@ -441,6 +455,11 @@ void psxHwWrite32(u32 add, u32 value) {
 	case 0x1120: psxRcntWcount(2, value & 0xffff); return;
 	case 0x1124: psxRcntWmode(2, value); return;
 	case 0x1128: psxRcntWtarget(2, value & 0xffff); return;
+
+	case 0x1080: case 0x1090: case 0x10a0: case 0x10b0:
+	case 0x10c0: case 0x10d0: case 0x10e0:
+		value &= 0xffffff;   /* MADR: 24 bits */
+		break;
 
 	case 0x1060:
 		if ((value >> 9) != 5)

@@ -35,6 +35,13 @@
  *  MIPSREG_AT, MIPSREG_V0, MIPSREG_V1, MIPSREG_RA                            *
  *****************************************************************************/
 
+/* mirrors psxHwWrite8's full-width cases (bug #4) */
+static inline bool psxHwWrite8_is_wide(u32 lower)
+{
+	return (!(lower & 3) && lower >= 0x1070 && lower < 0x1100) ||
+	       (!(lower & 3) && lower >= 0x1100 && lower < 0x1130 && (lower & 0xf) <= 8);
+}
+
 /* Will emit code for any indirect stores (calls to C). Bool at ptr param
  *  'C_func_called' will be set to true if a call to C is made, false if not.
  * Returns: true if caller should do a direct store to psxH[]
@@ -122,6 +129,15 @@ static bool emit_const_hw_store(u32 addr, u32 r2, u32 opcode, bool *C_func_calle
 					ANDI(MIPSREG_A0, r2, 0xff); // <BD>
 					*C_func_called = true;
 					// NOTE: we also write to psxH[], as psxhw.cpp (perhaps unnecessarily?) does
+					direct = true;
+					break;
+
+				case 0x1070 ... 0x10ff:  // IRQ + DMA regs: aligned sb is a full-word
+				case 0x1100 ... 0x112f:  //  write, timers 16-bit (psxHwWrite8, bug #4)
+					if (psxHwWrite8_is_wide(lower)) {
+						indirect = true;
+						break;
+					}
 					direct = true;
 					break;
 
@@ -501,15 +517,15 @@ static bool emit_const_hw_store(u32 addr, u32 r2, u32 opcode, bool *C_func_calle
 
 				break;
 			}
-			case 8:
+			case 8:   /* full rt, as the interpreter and the bus (bug #4) */
 				EMIT_CONST_A0_HI();
-				ANDI(MIPSREG_A1, r2, 0xff);
+				MOV(MIPSREG_A1, r2);
 				JAL(psxHwWrite8);
 				EMIT_CONST_A0_LO();  // <BD> ($a0 fully valid before callee)
 				break;
 			case 16:
 				EMIT_CONST_A0_HI();
-				ANDI(MIPSREG_A1, r2, 0xffff);
+				MOV(MIPSREG_A1, r2);
 				JAL(psxHwWrite16);
 				EMIT_CONST_A0_LO();  // <BD>
 				break;
