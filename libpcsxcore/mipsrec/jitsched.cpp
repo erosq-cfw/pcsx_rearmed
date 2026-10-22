@@ -11,6 +11,7 @@
 #include <string.h>
 #include "jitsched.h"
 #include "../r3000a.h"
+#include "../psxmem.h"
 
 /* all zero-initialised (.bss, appended last): a .data entry would move
  * every pre-existing .data/.bss symbol */
@@ -223,6 +224,104 @@ extern "C" uint64_t mipsrec_tty_entry(uint32_t pc, uint32_t ra)
 extern u32 *recMem;   /* recompiler.cpp: next emitted word */
 
 /* recRecompile, at a block's first word: reserve the entry room (jitsched_tail fills it) */
+/* EROSQ load delay (2026-10-22, psxtest_cpu _d tests; Tekken 3's
+ * `beq t0,zero; mfc2 t0,$24 <BD>; bgtz t0`). The R3000 commits a load
+ * (and mfc0/mfc2/cfc2) one instruction late: the next instruction still
+ * reads the old rt, except LWL/LWR, which merge into the pending value (the
+ * interpreter's dload*). mipsrec writes rt at once. ldhaz_scan() looks for
+ * such a pair in the guest code the block will hold: straight-line, or a
+ * load in a branch delay slot read by the not-taken fall-through. Read by
+ * the taken target is opt-in (EROSQ_LDHAZ=2, ari64's target scan; jr/jalr
+ * targets are unknown): hlink's dt2-* control tests pin how those sites
+ * compile today (DelayTest's dt == 2 workaround / plain links). Such a block
+ * starts with a 5-word call to mipsrec_ldhaz_run, which interprets it with
+ * exact delay semantics and returns to the dispatch loop. The normal
+ * compile follows as dead code, so recRecompile (PGO-profiled) is untouched
+ * and every hazard-free block is emitted exactly as before.
+ * EROSQ_LDHAZ=0 disables it, EROSQ_LDHAZ_LOG=1 logs each such block. */
+u64 opcodeGetReads(const u32 op);           /* mips_codegen.cpp */
+extern "C" uint32_t mipsrec_ldhaz_run(uint32_t pc);
+extern "C" uintptr_t mipsrec_block_ret_addr(void);
+static int ldhaz_mode = -1, ldhaz_log;
+extern "C" { unsigned long mipsrec_ldhaz_blocks, mipsrec_ldhaz_runs; }
+
+static uint32_t ldhaz_word(uint32_t a)      /* 0 (nop) if unmapped */
+{
+	const void *p = psxm(a, 0);
+	return p == INVALID_PTR ? 0 : *(const uint32_t *)p;
+}
+
+static int ldhaz_is_load(uint32_t w)
+{
+	const uint32_t op = w >> 26, rs = (w >> 21) & 31;
+	return ((op >= 0x20 && op <= 0x26) || ((op == 0x10 || op == 0x12) && (rs == 0 || rs == 2))) &&
+	       ((w >> 16) & 31) != 0;
+}
+
+/* does the instruction after load w read the old rt (and so differ)? */
+static int ldhaz_pair(uint32_t w, uint32_t next)
+{
+	const uint32_t rt = (w >> 16) & 31, nop = next >> 26;
+	if (!next || ((nop == 0x22 || nop == 0x26) && ((next >> 16) & 31) == rt))
+		return 0;   /* nop; LWL/LWR merge into the pending value */
+	return (opcodeGetReads(next) >> rt) & 1;
+}
+
+static int ldhaz_scan(uint32_t start)
+{
+	for (uint32_t k = start, n = 0; n < 1024; k += 4, n++) {
+		const uint32_t w = ldhaz_word(k), op = w >> 26, fn = w & 63;
+		const int is_jump = op == 2 || op == 3 || (op == 0 && (fn == 8 || fn == 9));
+		const int is_branch = op == 1 || (op >= 4 && op <= 7);
+		if (op == 0 && (fn == 0x0c || fn == 0x0d))
+			return 0;                          /* syscall/break end the block */
+		if (is_jump || is_branch) {
+			const uint32_t ds = ldhaz_word(k + 4);
+			if (!ldhaz_is_load(ds))
+				return 0;
+			if (is_branch && ldhaz_pair(ds, ldhaz_word(k + 8)))
+				return 1;                      /* not taken: the fall-through */
+			if (ldhaz_mode < 2)
+				return 0;
+			if (is_branch)
+				return ldhaz_pair(ds, ldhaz_word(k + 4 + ((uint32_t)(int32_t)(int16_t)w << 2)));
+			if (op == 2 || op == 3)
+				return ldhaz_pair(ds, ldhaz_word((k & 0xf0000000) | ((w & 0x03ffffff) << 2)));
+			return 0;                          /* jr/jalr: target unknown */
+		}
+		if (ldhaz_is_load(w) && ldhaz_pair(w, ldhaz_word(k + 4)))
+			return 1;
+	}
+	return 0;
+}
+
+static int ldhaz_block(uint32_t pc)
+{
+	if (ldhaz_mode < 0) {
+		const char *e = getenv("EROSQ_LDHAZ");
+		ldhaz_mode = e ? atoi(e) : 1;
+		ldhaz_log = getenv("EROSQ_LDHAZ_LOG") != NULL;
+	}
+	return ldhaz_mode && ldhaz_scan(pc);
+}
+
+/* lui a0,hi(pc); jal mipsrec_ldhaz_run; ori a0,lo(pc) <BD>; j loop; move v1,zero <BD> */
+static void ldhaz_emit(uint32_t pc)
+{
+	const uintptr_t f = (uintptr_t)mipsrec_ldhaz_run, loop = mipsrec_block_ret_addr(), here = (uintptr_t)recMem;
+	if (!loop || ((here ^ f) & 0xf0000000) || ((here ^ loop) & 0xf0000000))
+		return;                                /* indirect-return mode / out of jal range: JIT as before */
+	recMem[0] = 0x3c040000 | (pc >> 16);
+	recMem[1] = 0x0c000000 | ((f >> 2) & 0x03ffffff);
+	recMem[2] = 0x34840000 | (pc & 0xffff);
+	recMem[3] = 0x08000000 | ((loop >> 2) & 0x03ffffff);
+	recMem[4] = 0x00001821;
+	recMem += 5;
+	mipsrec_ldhaz_blocks++;
+	if (ldhaz_log)
+		fprintf(stderr, "ldhaz: block %08x interpreted\n", pc);
+}
+
 extern "C" void mipsrec_entry_room(uint32_t pc)
 {
 	uint32_t aux[2];
@@ -237,6 +336,8 @@ extern "C" void mipsrec_entry_room(uint32_t pc)
 #endif
 	cur_words = cur_idle ? 5 : 0;
 	recMem += cur_words;
+	if (ldhaz_block(pc))   /* load delay: the block runs in the interpreter */
+		ldhaz_emit(pc);
 }
 
 /* Code outside RAM/BIOS (2026-10-22; ps1-tests cpu/code-in-io: scratchpad, IO
@@ -287,6 +388,7 @@ static u32 cio_fetch(psxRegisters *r, const uintptr_t *luts, u32 pc)
 	return cio_orig_fetch(r, luts, pc);
 }
 
+extern "C" void intEnsureExactAccess(void);   /* psxinterpreter.c */
 extern "C" uint32_t mipsrec_cio_run(void)
 {
 	cio_runs++;
@@ -295,6 +397,7 @@ extern "C" uint32_t mipsrec_cio_run(void)
 		psxException(R3000E_AdEL << 2, R3000A_BRANCH_NONE_OR_EXCEPTION, &psxRegs.CP0);
 		return psxRegs.pc;
 	}
+	intEnsureExactAccess();   /* exact AdEL/AdES as under the JIT */
 	cio_orig_fetch = (cio_fetch_fn)psxRegs.ptrs.intFetch;
 	psxRegs.ptrs.intFetch = cio_fetch;
 	do {   /* psxRegs.pc was stored by the dispatch loop before it jumped here */
@@ -305,6 +408,25 @@ extern "C" uint32_t mipsrec_cio_run(void)
 	} while (!cio_has_slots(psxRegs.pc) && !psxRegs.stop);
 	psxRegs.ptrs.intFetch = cio_orig_fetch;
 	psxInt.Notify(R3000ACPU_NOTIFY_BEFORE_SAVE, NULL);   /* flush the load-delay pipeline */
+	return psxRegs.pc;
+}
+
+/* recompiler.cpp rec_ldhaz_block: interpret one block that has a load-use
+ * hazard, with the interpreter's exact load-delay semantics. Keep going
+ * while a load is still pending at a block end (a load in the delay slot),
+ * so the target's first instruction also sees the old value. Then flush
+ * (mipsrec has no delay state), as mipsrec_cio_run does. */
+extern "C" uint32_t mipsrec_ldhaz_run(uint32_t pc)
+{
+	mipsrec_ldhaz_runs++;
+	intEnsureExactAccess();
+	psxRegs.pc = pc;
+	do
+		psxInt.ExecuteBlock(&psxRegs, EXEC_CALLER_OTHER);
+	while ((psxRegs.dloadReg[0] | psxRegs.dloadReg[1]) && !psxRegs.stop);
+	psxInt.Notify(R3000ACPU_NOTIFY_BEFORE_SAVE, NULL);   /* flush the load-delay pipeline */
+	if ((int32_t)(psxRegs.cycle - psxRegs.next_interupt) >= 0)
+		mipsrec_branch_test();
 	return psxRegs.pc;
 }
 
@@ -904,6 +1026,7 @@ chain:
 static void ua_report(void)
 {
 	fprintf(stderr, "unaligned: host %lu jit %lu undecoded %lu\n", ua_host, ua_jit, ua_bad);
+	fprintf(stderr, "ldhaz: %lu blocks interpreted, %lu runs\n", mipsrec_ldhaz_blocks, mipsrec_ldhaz_runs);
 	fprintf(stderr, "unaligned: exact %lu (overflow %lu; %lu trapping add/sub compiled) fallback %lu index-peak %u blocks; emulated %lu hoisted %lu (why io %lu cmp %lu acc %lu alu %lu hoist %lu bios %lu chk %lu)\n",
 		ee_exact_n, ee_ovf_n, mipsrec_ovf_sites, ee_fb_n, ee_peak, ee_emul, ee_hoist, ee_why[0], ee_why[1], ee_why[2], ee_why[3], ee_why[4], ee_why[5], ee_why[6]);
 }

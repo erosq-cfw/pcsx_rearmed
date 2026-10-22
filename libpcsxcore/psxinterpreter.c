@@ -1281,6 +1281,32 @@ static void setupCop(u32 sr)
 		psxBSC[19] = psxCOPd;
 }
 
+/* EROSQ: mipsrec raises exact AdEL/AdES itself, so the code it hands to
+ * the interpreter (blocks with a load-use hazard, code outside RAM) must
+ * too. Installs the checking load/store/jr variants without touching
+ * Config.PreciseExceptions (a saved user option). The GTE LWC2/SWC2 and
+ * ExecuteBlock (debug-breakpoint) variants stay as configured.
+ * Cheap to call before each use: intApplyConfig() may have reset them. */
+__attribute__((section(".jitsched_text")))   /* moves no existing code */
+void intEnsureExactAccess(void) {
+	if (psxBSC[0x23] == psxLWe)
+		return;
+	psxBSC[0x20] = psxLBe;
+	psxBSC[0x21] = psxLHe;
+	psxBSC[0x22] = psxLWLe;
+	psxBSC[0x23] = psxLWe;
+	psxBSC[0x24] = psxLBUe;
+	psxBSC[0x25] = psxLHUe;
+	psxBSC[0x26] = psxLWRe;
+	psxBSC[0x28] = psxSBe;
+	psxBSC[0x29] = psxSHe;
+	psxBSC[0x2a] = psxSWLe;
+	psxBSC[0x2b] = psxSWe;
+	psxBSC[0x2e] = psxSWRe;
+	psxSPC[0x08] = psxJRe;
+	psxSPC[0x09] = psxJALRe;
+}
+
 void intApplyConfig() {
 	int cycle_mult;
 

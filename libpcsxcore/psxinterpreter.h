@@ -10,6 +10,7 @@ u32 intFakeFetch(u32 pc);
 // called by "new_dynarec"
 void execI(struct psxRegisters *regs);
 void intApplyConfig();
+void intEnsureExactAccess(void);
 void MTC0(struct psxRegisters *regs, int reg, u32 val);
 
 // execute one opcode word with immediate register effect (mipsrec dynarec)
