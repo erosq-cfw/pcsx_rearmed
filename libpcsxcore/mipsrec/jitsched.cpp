@@ -1025,8 +1025,14 @@ static int ee_redirect(mcontext_t *mc)
 	return 1;
 }
 
+static int ua_zero_siaddr;   /* EROSQ_TEST_SIADDR0=1: offline test hook, see ua_sigbus */
 static void ua_sigbus(int sig, siginfo_t *si, void *ucv)
 {
+	/* the device kernel's address-error SIGBUS carries si_addr = 0, qemu-user
+	 * fills it in: the hook makes qemu runs see the device's siginfo, so
+	 * nothing below may depend on si_addr (offline/siaddr0.sh) */
+	if (ua_zero_siaddr)
+		si->si_addr = 0;
 	ucontext_t *uc = (ucontext_t *)ucv;
 	mcontext_t *mc = &uc->uc_mcontext;
 	const uint32_t pc = (uint32_t)mc->pc;
@@ -1036,6 +1042,9 @@ static void ua_sigbus(int sig, siginfo_t *si, void *ucv)
 		/* no si_addr test: the device kernel's address-error SIGBUS carries
 		 * si_addr = 0 (qemu fills it in); t2 is the faulting address here */
 		if (w == 0x8d480000 && (v0 & 3) &&                                            /* dispatch slot load, */
+#ifdef SIADDR_MUTANT   /* offline mutant: the pre-ff97856 si_addr test (siaddr0.sh must catch it) */
+		    (uint32_t)(uintptr_t)si->si_addr == t2 &&
+#endif
 		    (t2 & 3) == (v0 & 3) && !(pc >= ua_jlo && pc < ua_jhi) &&                    /* misaligned guest pc */
 		    cio_redirect(uc, pc))
 			return;   /* the stub raises AdEL (mipsrec_cio_run) */
@@ -1077,6 +1086,7 @@ static void ua_install(void)
 	sigemptyset(&sa.sa_mask);
 	sigaction(SIGBUS, &sa, &ua_prev);
 	{
+		ua_zero_siaddr = getenv("EROSQ_TEST_SIADDR0") != NULL;
 		const char *e = getenv("EROSQ_EE");
 		ee_mode = e ? atoi(e) : 1;
 		sa.sa_sigaction = ee_sigtrap;
