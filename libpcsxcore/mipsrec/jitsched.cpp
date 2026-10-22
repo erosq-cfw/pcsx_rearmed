@@ -8,6 +8,7 @@
  */
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include "jitsched.h"
 #include "../r3000a.h"
 
@@ -205,6 +206,20 @@ extern "C" uint64_t mipsrec_idle_entry(uint32_t pc, uint32_t ra)
 	return ret;
 }
 
+#ifdef HX_TTY
+/* harness only: the BIOS A0/B0/C0 call stubs in RAM print through psxJumpTest
+ * (the interpreter's -psxout path; mipsrec never calls it). Guest regs are in
+ * psxRegs at block entry (preload comes after the room). */
+extern "C" uint64_t mipsrec_tty_entry(uint32_t pc, uint32_t ra)
+{
+	const uint32_t save = psxRegs.pc;
+	psxRegs.pc = pc;
+	psxJumpTest();
+	psxRegs.pc = save;
+	return ((uint64_t)ra << 32) | pc;
+}
+#endif
+
 extern u32 *recMem;   /* recompiler.cpp: next emitted word */
 
 /* recRecompile, at a block's first word: reserve the entry room (jitsched_tail fills it) */
@@ -215,9 +230,115 @@ extern "C" void mipsrec_entry_room(uint32_t pc)
 		jitsched_init();
 	cur_pc = pc;
 	cur_idle = idleskip_on > 0 ? idle_match(pc, aux) : IS_NONE;
+#ifdef HX_TTY   /* offline harness build only: -psxout text under the JIT */
+	if (!cur_idle && Config.PsxOut && !Config.HLE &&
+	    ((pc & 0x1fffffff) == 0xa0 || (pc & 0x1fffffff) == 0xb0 || (pc & 0x1fffffff) == 0xc0))
+		cur_idle = IS_N;   /* "shape" IS_N = BIOS call stub: hook calls mipsrec_tty_entry */
+#endif
 	cur_words = cur_idle ? 5 : 0;
 	recMem += cur_words;
 }
+
+/* Code outside RAM/BIOS (2026-10-22; ps1-tests cpu/code-in-io: scratchpad, IO
+ * ports). Block-pointer slots exist only for RAM (+mirrors) and BIOS, so the
+ * dispatch loop's slot load (lw t0,0(t2), t2 = lookup of v0) faults for any
+ * other pc: psxRecLUT[pc >> 16] == 0 in the LUT dispatch (the shipped one;
+ * EXP1 0x1f00xxxx included, so it never aliases RAM slots). The mmap dispatch
+ * (Part B, compiled out) would fault past its 4 recRAM mirrors but alias EXP1
+ * onto RAM (24-bit lookup) -- revisit if Part B is ever enabled. This SIGSEGV handler
+ * (chained in front of faultmem's) recognises exactly that instruction and
+ * fault address, hands the loop a stub instead of a block pointer, and the
+ * stub interprets until pc is back in RAM/BIOS, then re-enters the loop top
+ * with v1 = 0 (the interpreter charged the cycles). The normal path is
+ * untouched: no check runs unless the slot load faults. */
+#include <signal.h>
+#include <stddef.h>
+#include <ucontext.h>
+#define CIO_REC_RAM_VADDR 0x21000000u      /* = REC_RAM_VADDR (recompiler.cpp, Part B only) */
+extern "C" void mipsrec_branch_test(void);   /* plugin.c: gen_interupt seam */
+static struct sigaction cio_prev;
+static uint32_t cio_stub[8] __attribute__((aligned(32)));
+static uintptr_t cio_loop;                   /* dispatch loop top the stub returns to */
+static unsigned long cio_runs, cio_blocks;
+
+static int cio_has_slots(uint32_t pc)        /* RAM (+mirrors) or BIOS, any segment */
+{
+	const uint32_t p = pc & 0x1fffffff;
+	return ((pc >> 29) == 0 || (pc >> 29) == 4 || (pc >> 29) == 5) &&
+	       (p < 0x800000 || (p >= 0x1fc00000 && p < 0x1fc80000));
+}
+
+extern "C" uint32_t mipsrec_cio_run(void)
+{
+	cio_runs++;
+	do {   /* psxRegs.pc was stored by the dispatch loop before it jumped here */
+		psxInt.ExecuteBlock(&psxRegs, EXEC_CALLER_OTHER);
+		cio_blocks++;
+		if ((int32_t)(psxRegs.cycle - psxRegs.next_interupt) >= 0)
+			mipsrec_branch_test();
+	} while (!cio_has_slots(psxRegs.pc) && !psxRegs.stop);
+	psxInt.Notify(R3000ACPU_NOTIFY_BEFORE_SAVE, NULL);   /* flush the load-delay pipeline */
+	return psxRegs.pc;
+}
+
+static void cio_emit(uintptr_t loop)
+{
+	const uintptr_t f = (uintptr_t)mipsrec_cio_run;
+	cio_stub[0] = 0x0c000000 | ((f >> 2) & 0x03ffffff);      /* jal  mipsrec_cio_run (v0 = pc) */
+	cio_stub[1] = 0;                                          /* nop */
+	cio_stub[2] = 0x08000000 | ((loop >> 2) & 0x03ffffff);   /* j    loop top */
+	cio_stub[3] = 0x00001821;                                 /* move v1, zero <BD> */
+	__builtin___clear_cache((char *)cio_stub, (char *)(cio_stub + 4));
+	cio_loop = loop;
+}
+
+static void cio_sigsegv(int sig, siginfo_t *si, void *ucv)
+{
+	ucontext_t *uc = (ucontext_t *)ucv;
+	const uintptr_t hpc = (uintptr_t)uc->uc_mcontext.pc;
+	const uint32_t v0 = (uint32_t)uc->uc_mcontext.gregs[2], t2 = (uint32_t)uc->uc_mcontext.gregs[10];
+	if (hpc && !(hpc & 3) && *(const uint32_t *)hpc == 0x8d480000 &&     /* lw t0, 0(t2) */
+	    (uint32_t)(uintptr_t)si->si_addr == t2 &&
+	    (t2 == (CIO_REC_RAM_VADDR | (v0 & 0x00ffffff)) ||                /* mmap dispatch (Part B) */
+	     (t2 < 0x10000 && t2 == (v0 & 0xffff)))) {                       /* LUT, psxRecLUT[] == 0 */
+		const uint32_t lw_t3_cycle = 0x8fcb0000 | (uint32_t)offsetof(psxRegisters, cycle);
+		for (int k = 1; k <= 16; k++) {   /* LUT loop: top is 10 words up */
+			const uintptr_t a = hpc - 4 * k;
+			if (*(const uint32_t *)a == lw_t3_cycle) {           /* loop: lw t3, cycle(fp) */
+				if (((a ^ (uintptr_t)cio_stub) & 0xf0000000) != 0)
+					break;                                   /* j can't reach: chain (crash) */
+				if (a != cio_loop)
+					cio_emit(a);
+				uc->uc_mcontext.gregs[8] = (uintptr_t)cio_stub;   /* t0 = "block" */
+				uc->uc_mcontext.pc = hpc + 4;
+				return;
+			}
+		}
+	}
+	if ((cio_prev.sa_flags & SA_SIGINFO) && cio_prev.sa_sigaction) {
+		cio_prev.sa_sigaction(sig, si, ucv);
+		return;
+	}
+	if (cio_prev.sa_handler == SIG_IGN)
+		return;
+	signal(SIGSEGV, SIG_DFL);   /* re-faults into the default action */
+}
+
+static void cio_install(void)
+{
+	if ((((uintptr_t)cio_stub ^ (uintptr_t)mipsrec_cio_run) & 0xf0000000) != 0) {
+		fprintf(stderr, "mipsrec: code-outside-RAM fallback disabled (jal range)\n");
+		return;
+	}
+	struct sigaction sa;
+	memset(&sa, 0, sizeof sa);
+	sa.sa_sigaction = cio_sigsegv;
+	sa.sa_flags = SA_SIGINFO;
+	sigemptyset(&sa.sa_mask);
+	sigaction(SIGSEGV, &sa, &cio_prev);
+}
+
+extern "C" void mipsrec_cio_stats(unsigned long *runs, unsigned long *blocks) { *runs = cio_runs; *blocks = cio_blocks; }
 
 static void jitsched_init(void)
 {
@@ -227,6 +348,7 @@ static void jitsched_init(void)
 	jitsched_stat = getenv("EROSQ_JITSCHED_STAT") != NULL;
 	blkext_stat = getenv("EROSQ_BLKEXT_STAT") != NULL;
 	idleskip_init();
+	cio_install();
 	if (jitsched_on > 0)
 		fprintf(stderr, "mipsrec: jitsched on\n");   /* stderr: unbuffered, survives SIGTERM */
 }
@@ -368,14 +490,19 @@ int jitsched_tail(uint32_t *start, uint32_t *end, int es, unsigned long long *es
 	bx_block(start, guest);
 	uint32_t *room = start;
 	if (cur_idle) {
+#ifdef HX_TTY
+		const uint32_t h = cur_idle == IS_N ? (uint32_t)(uintptr_t)mipsrec_tty_entry : (uint32_t)(uintptr_t)mipsrec_idle_entry;
+#else
 		const uint32_t h = (uint32_t)(uintptr_t)mipsrec_idle_entry;
+#endif
 		room[0] = 0x3c040000 | (cur_pc >> 16);               /* lui  a0, hi(pc) */
 		room[1] = 0x03e02821;                                /* move a1, ra */
 		room[2] = 0x0c000000 | ((h >> 2) & 0x03ffffff);      /* jal  mipsrec_idle_entry */
 		room[3] = 0x34840000 | (cur_pc & 0xffff);            /* ori  a0, a0, lo(pc) <BD> */
 		room[4] = 0x0060f821;                                /* move ra, v1 */
 		room += 5;
-		is_blocks[cur_idle]++;
+		if (cur_idle < IS_N)
+			is_blocks[cur_idle]++;
 	}
 	cur_idle = cur_words = 0;
 	if (jitsched_on > 0) {
