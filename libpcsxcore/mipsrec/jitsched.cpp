@@ -268,15 +268,37 @@ static int cio_has_slots(uint32_t pc)        /* RAM (+mirrors) or BIOS, any segm
 	       (p < 0x800000 || (p >= 0x1fc00000 && p < 0x1fc80000));
 }
 
+/* Instruction fetch from IO space while the fallback interprets: hardware
+ * executes code placed in the DMA (0x1f801080-0x1f8010ff) and SPU
+ * (0x1f801c00-0x1f801fff) register ranges -- the fetch is a bus read of the
+ * registers -- while scratchpad, MDEC, the IRQ controller etc. raise IBE
+ * (ps1-tests cpu/code-in-io, hardware psx.log 7/7). The interpreter's own
+ * fetch IBEs on all of them (psxm_lut maps no IO); wrapping its fetch pointer
+ * here instead of editing psxinterpreter.c keeps every pre-existing object's
+ * layout (psxinterpreter.o links early). IO is never cached. */
+extern "C" u32 psxHwRead32(u32 add);
+typedef u32 (*cio_fetch_fn)(psxRegisters *, const uintptr_t *, u32);
+static cio_fetch_fn cio_orig_fetch;
+static u32 cio_fetch(psxRegisters *r, const uintptr_t *luts, u32 pc)
+{
+	const u32 a = pc & 0x1ffffffc;
+	if ((a >= 0x1f801080 && a < 0x1f801100) || (a >= 0x1f801c00 && a < 0x1f802000))
+		return psxHwRead32(a);
+	return cio_orig_fetch(r, luts, pc);
+}
+
 extern "C" uint32_t mipsrec_cio_run(void)
 {
 	cio_runs++;
+	cio_orig_fetch = (cio_fetch_fn)psxRegs.ptrs.intFetch;
+	psxRegs.ptrs.intFetch = cio_fetch;
 	do {   /* psxRegs.pc was stored by the dispatch loop before it jumped here */
 		psxInt.ExecuteBlock(&psxRegs, EXEC_CALLER_OTHER);
 		cio_blocks++;
 		if ((int32_t)(psxRegs.cycle - psxRegs.next_interupt) >= 0)
 			mipsrec_branch_test();
 	} while (!cio_has_slots(psxRegs.pc) && !psxRegs.stop);
+	psxRegs.ptrs.intFetch = cio_orig_fetch;
 	psxInt.Notify(R3000ACPU_NOTIFY_BEFORE_SAVE, NULL);   /* flush the load-delay pipeline */
 	return psxRegs.pc;
 }
