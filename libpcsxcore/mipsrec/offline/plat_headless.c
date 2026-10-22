@@ -338,7 +338,8 @@ extern void (*mipsrec_irq_test_hook)(psxCP0Regs *cp0) __attribute__((weak));
 
 void plat_init(void)
 {
-	{ struct sigaction sa; memset(&sa, 0, sizeof sa); sa.sa_sigaction = trap; sa.sa_flags = SA_SIGINFO; sigaction(SIGTRAP, &sa, 0); sigaction(SIGBUS, &sa, 0); }
+	{ struct sigaction sa; memset(&sa, 0, sizeof sa); sa.sa_sigaction = trap; sa.sa_flags = SA_SIGINFO; sigaction(SIGTRAP, &sa, 0); sigaction(SIGBUS, &sa, 0);
+	  if (getenv("HX_TRAPSEGV")) sigaction(SIGSEGV, &sa, 0); }   /* faultmem chains unhandled faults here */
 	if (getenv("HX_LINEBUF"))   /* -psxout TTY survives a timeout kill (interpreter reference runs) */
 		setvbuf(stdout, NULL, _IOLBF, 0);
 	if (getenv("HX_CYCLES") && &mipsrec_irq_test_hook) {
