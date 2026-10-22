@@ -32,9 +32,22 @@ static void recBASIC()
 	recCP2BSC[_Rs_]();
 }
 
+/* EROSQ: branch encodings the interpreter decodes but these tables did not
+ * (ps1-tests / Amidog psxtest_cpu): BLEZ/BGTZ ignore rt -- a non-zero rt hit
+ * emitBxxZ's "Error opcode" exit(1) --, and REGIMM rt values other than
+ * 0/1/0x10/0x11 are BLTZ/BGEZ by rt bit 0 without link (psxREGIMM) -- they
+ * were recNULL and emitted nothing. The wrappers canonicalise psxRegs.code
+ * for the existing emitters; they live in the appended .jitsched_text section
+ * and only table entries change, so no pre-existing code moves. */
+#define REC_CANON __attribute__((section(".jitsched_text"), noinline))
+static REC_CANON void recBLEZ_any() { const u32 c = psxRegs.code; psxRegs.code = c & ~0x001f0000u; recBLEZ(); psxRegs.code = c; }
+static REC_CANON void recBGTZ_any() { const u32 c = psxRegs.code; psxRegs.code = c & ~0x001f0000u; recBGTZ(); psxRegs.code = c; }
+static REC_CANON void recBLTZ_any() { const u32 c = psxRegs.code; psxRegs.code = c & ~0x001f0000u; recBLTZ(); psxRegs.code = c; }
+static REC_CANON void recBGEZ_any() { const u32 c = psxRegs.code; psxRegs.code = (c & ~0x001f0000u) | 0x00010000u; recBGEZ(); psxRegs.code = c; }
+
 void (*recBSC[64])() =
 {
-	recSPECIAL, recREGIMM, recJ   , recJAL  , recBEQ , recBNE , recBLEZ, recBGTZ,
+	recSPECIAL, recREGIMM, recJ   , recJAL  , recBEQ , recBNE , recBLEZ_any, recBGTZ_any,
 	recADDI   , recADDIU , recSLTI, recSLTIU, recANDI, recORI , recXORI, recLUI ,
 	recCOP0   , recNULL  , recCOP2, recNULL , recNULL, recNULL, recNULL, recNULL,
 	recNULL   , recNULL  , recNULL, recNULL , recNULL, recNULL, recNULL, recNULL,
@@ -58,10 +71,10 @@ void (*recSPC[64])() =
 
 void (*recREG[32])() =
 {
-	recBLTZ  , recBGEZ  , recNULL, recNULL, recNULL, recNULL, recNULL, recNULL,
-	recNULL  , recNULL  , recNULL, recNULL, recNULL, recNULL, recNULL, recNULL,
-	recBLTZAL, recBGEZAL, recNULL, recNULL, recNULL, recNULL, recNULL, recNULL,
-	recNULL  , recNULL  , recNULL, recNULL, recNULL, recNULL, recNULL, recNULL
+	recBLTZ    , recBGEZ    , recBLTZ_any, recBGEZ_any, recBLTZ_any, recBGEZ_any, recBLTZ_any, recBGEZ_any,
+	recBLTZ_any, recBGEZ_any, recBLTZ_any, recBGEZ_any, recBLTZ_any, recBGEZ_any, recBLTZ_any, recBGEZ_any,
+	recBLTZAL  , recBGEZAL  , recBLTZ_any, recBGEZ_any, recBLTZ_any, recBGEZ_any, recBLTZ_any, recBGEZ_any,
+	recBLTZ_any, recBGEZ_any, recBLTZ_any, recBGEZ_any, recBLTZ_any, recBGEZ_any, recBLTZ_any, recBGEZ_any
 };
 
 void (*recCP0[32])() =
