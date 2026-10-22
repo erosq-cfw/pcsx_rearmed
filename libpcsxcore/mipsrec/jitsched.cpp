@@ -1625,3 +1625,55 @@ extern "C" void mipsrec_branch_test_hooked(union psxCP0Regs_ *cp0)
 extern "C" void mipsrec_jitsched_set(int on) { jitsched_inited = 1; jitsched_on = on; }
 extern "C" void mipsrec_jitsched_stats(unsigned long *blocks, unsigned long *changed, unsigned long *regions)
 { *blocks = js_blocks; *changed = js_changed; *regions = js_regions; }
+
+/* A/B pixel gates (2026-10-22, default off), via -Wl,--wrap=drm_present so
+ * the shipped frontend code is untouched (only its call target changes) and
+ * no new dynamic import appears: every presented frame passes through here.
+ * EROSQ_FHASH=N: stderr "FHASH flip=<k> 320x240 crc=<hex>" every N presents
+ * (the hash is FNV-1a 32 of the visible 320x240 scanout, i.e. the
+ * converter's output); EROSQ_SHOT_FLIP=K: write it to /media/sd/psx/shot.ppm
+ * at present K. Weak refs: harness builds have no drm_out.o. */
+extern "C" int __real_drm_present(void) __attribute__((weak));
+extern "C" uint16_t *drm_pixels(int *stride_px) __attribute__((weak));
+extern "C" int __wrap_drm_present(void)
+{
+	static int init, fh_every, shot_flip;
+	static unsigned long flips;
+	if (!init) {
+		const char *e = getenv("EROSQ_FHASH"), *k = getenv("EROSQ_SHOT_FLIP");
+		init = 1;
+		fh_every = e ? atoi(e) : 0;
+		shot_flip = k ? atoi(k) : 0;
+	}
+	flips++;
+	if ((fh_every > 0 || shot_flip > 0) && drm_pixels) {
+		int stride;
+		const uint16_t *fb = drm_pixels(&stride);
+		if (fb && fh_every > 0 && flips % (unsigned long)fh_every == 0) {
+			uint32_t h = 2166136261u;
+			for (int y = 0; y < 240; y++)
+				for (int x = 0; x < 320; x++) {
+					const uint16_t p = fb[y * stride + x];
+					h = (h ^ (p & 0xff)) * 16777619u;
+					h = (h ^ (p >> 8)) * 16777619u;
+				}
+			fprintf(stderr, "FHASH flip=%lu 320x240 crc=%08x\n", flips, h);
+		}
+		if (fb && shot_flip > 0 && (long)flips == shot_flip) {
+			FILE *f = fopen("/media/sd/psx/shot.ppm", "wb");
+			if (f) {
+				fprintf(f, "P6\n320 240\n255\n");
+				for (int y = 0; y < 240; y++)
+					for (int x = 0; x < 320; x++) {
+						const uint16_t p = fb[y * stride + x];
+						const unsigned char rgb[3] = { (unsigned char)(((p >> 11) & 0x1f) << 3),
+							(unsigned char)(((p >> 5) & 0x3f) << 2), (unsigned char)((p & 0x1f) << 3) };
+						fwrite(rgb, 1, 3, f);
+					}
+				fclose(f);
+				fprintf(stderr, "shot: wrote /media/sd/psx/shot.ppm 320x240 at flip %lu\n", flips);
+			}
+		}
+	}
+	return __real_drm_present ? __real_drm_present() : 0;
+}
