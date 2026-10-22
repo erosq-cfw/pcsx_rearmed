@@ -45,6 +45,25 @@ static REC_CANON void recBGTZ_any() { const u32 c = psxRegs.code; psxRegs.code =
 static REC_CANON void recBLTZ_any() { const u32 c = psxRegs.code; psxRegs.code = c & ~0x001f0000u; recBLTZ(); psxRegs.code = c; }
 static REC_CANON void recBGEZ_any() { const u32 c = psxRegs.code; psxRegs.code = (c & ~0x001f0000u) | 0x00010000u; recBGEZ(); psxRegs.code = c; }
 
+/* EROSQ: BREAK raises the Bp exception (EPC = the break, like recSYSCALL with
+ * cause 0x24 -- the interpreter's psxBREAK); recBREAK emitted nothing (Amidog
+ * psxtest_cpu "break test"). In the appended section; only the recSPC entry
+ * changes. */
+static REC_CANON void recBREAK_exc()
+{
+	regClearJump();
+	LI32(TEMP_1, pc - 4);
+	SW(TEMP_1, PERM_REG_1, off(pc));
+	ADDIU(MIPSREG_A2, PERM_REG_1, offCP0(0)); // a2 = &psxRegs.CP0
+	LI16(MIPSREG_A1, (branch == 1 ? 1 : 0));
+	JAL(psxException);
+	LI16(MIPSREG_A0, R3000E_Bp << 2); // <BD>
+	rec_recompile_end_part1();
+	LW(MIPSREG_V0, PERM_REG_1, off(pc)); // new PC set by psxException()
+	rec_recompile_end_part2(false);
+	end_block = 1;
+}
+
 void (*recBSC[64])() =
 {
 	recSPECIAL, recREGIMM, recJ   , recJAL  , recBEQ , recBNE , recBLEZ_any, recBGTZ_any,
@@ -60,7 +79,7 @@ void (*recBSC[64])() =
 void (*recSPC[64])() =
 {
 	recSLL , recNULL, recSRL , recSRA , recSLLV   , recNULL , recSRLV, recSRAV,
-	recJR  , recJALR, recNULL, recNULL, recSYSCALL, recBREAK, recNULL, recNULL,
+	recJR  , recJALR, recNULL, recNULL, recSYSCALL, recBREAK_exc, recNULL, recNULL,
 	recMFHI, recMTHI, recMFLO, recMTLO, recNULL   , recNULL , recNULL, recNULL,
 	recMULT, recMULTU, recDIV, recDIVU, recNULL   , recNULL , recNULL, recNULL,
 	recADD , recADDU, recSUB , recSUBU, recAND    , recOR   , recXOR , recNOR ,
