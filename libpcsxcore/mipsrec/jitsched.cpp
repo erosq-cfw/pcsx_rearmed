@@ -290,6 +290,11 @@ static u32 cio_fetch(psxRegisters *r, const uintptr_t *luts, u32 pc)
 extern "C" uint32_t mipsrec_cio_run(void)
 {
 	cio_runs++;
+	if (psxRegs.pc & 3) {   /* jr/jalr to a misaligned target: AdEL on the fetch, EPC = BadVAddr = target (as doBranchRegE) */
+		psxRegs.CP0.n.BadVAddr = psxRegs.pc;
+		psxException(R3000E_AdEL << 2, R3000A_BRANCH_NONE_OR_EXCEPTION, &psxRegs.CP0);
+		return psxRegs.pc;
+	}
 	cio_orig_fetch = (cio_fetch_fn)psxRegs.ptrs.intFetch;
 	psxRegs.ptrs.intFetch = cio_fetch;
 	do {   /* psxRegs.pc was stored by the dispatch loop before it jumped here */
@@ -314,6 +319,26 @@ static void cio_emit(uintptr_t loop)
 	cio_loop = loop;
 }
 
+/* the dispatch loop's slot load (lw t0,0(t2)) faulted for v0 = pc: hand the
+ * loop the stub instead of a block pointer. 1 = redirected. */
+static int cio_redirect(ucontext_t *uc, uintptr_t hpc)
+{
+	const uint32_t lw_t3_cycle = 0x8fcb0000 | (uint32_t)offsetof(psxRegisters, cycle);
+	for (int k = 1; k <= 16; k++) {   /* LUT loop: top is 10 words up */
+		const uintptr_t a = hpc - 4 * k;
+		if (*(const uint32_t *)a == lw_t3_cycle) {           /* loop: lw t3, cycle(fp) */
+			if (((a ^ (uintptr_t)cio_stub) & 0xf0000000) != 0)
+				return 0;                                /* j can't reach: chain (crash) */
+			if (a != cio_loop)
+				cio_emit(a);
+			uc->uc_mcontext.gregs[8] = (uintptr_t)cio_stub;   /* t0 = "block" */
+			uc->uc_mcontext.pc = hpc + 4;
+			return 1;
+		}
+	}
+	return 0;
+}
+
 static void cio_sigsegv(int sig, siginfo_t *si, void *ucv)
 {
 	ucontext_t *uc = (ucontext_t *)ucv;
@@ -322,21 +347,9 @@ static void cio_sigsegv(int sig, siginfo_t *si, void *ucv)
 	if (hpc && !(hpc & 3) && *(const uint32_t *)hpc == 0x8d480000 &&     /* lw t0, 0(t2) */
 	    (uint32_t)(uintptr_t)si->si_addr == t2 &&
 	    (t2 == (CIO_REC_RAM_VADDR | (v0 & 0x00ffffff)) ||                /* mmap dispatch (Part B) */
-	     (t2 < 0x10000 && t2 == (v0 & 0xffff)))) {                       /* LUT, psxRecLUT[] == 0 */
-		const uint32_t lw_t3_cycle = 0x8fcb0000 | (uint32_t)offsetof(psxRegisters, cycle);
-		for (int k = 1; k <= 16; k++) {   /* LUT loop: top is 10 words up */
-			const uintptr_t a = hpc - 4 * k;
-			if (*(const uint32_t *)a == lw_t3_cycle) {           /* loop: lw t3, cycle(fp) */
-				if (((a ^ (uintptr_t)cio_stub) & 0xf0000000) != 0)
-					break;                                   /* j can't reach: chain (crash) */
-				if (a != cio_loop)
-					cio_emit(a);
-				uc->uc_mcontext.gregs[8] = (uintptr_t)cio_stub;   /* t0 = "block" */
-				uc->uc_mcontext.pc = hpc + 4;
-				return;
-			}
-		}
-	}
+	     (t2 < 0x10000 && t2 == (v0 & 0xffff))) &&                       /* LUT, psxRecLUT[] == 0 */
+	    cio_redirect(uc, hpc))
+		return;
 	if ((cio_prev.sa_flags & SA_SIGINFO) && cio_prev.sa_sigaction) {
 		cio_prev.sa_sigaction(sig, si, ucv);
 		return;
@@ -452,6 +465,11 @@ static void ua_sigbus(int sig, siginfo_t *si, void *ucv)
 	if (pc && !(pc & 3)) {
 		const uint32_t w = *(const uint32_t *)(uintptr_t)pc;
 		uint32_t next;
+		const uint32_t v0 = (uint32_t)mc->gregs[2], t2 = (uint32_t)mc->gregs[10];
+		if (w == 0x8d480000 && (v0 & 3) && (uint32_t)(uintptr_t)si->si_addr == t2 &&   /* dispatch slot load, */
+		    (t2 & 3) == (v0 & 3) && !(pc >= ua_jlo && pc < ua_jhi) &&                    /* misaligned guest pc */
+		    cio_redirect(uc, pc))
+			return;   /* the stub raises AdEL (mipsrec_cio_run) */
 		if (ua_access(mc, w)) {
 			mc->pc = pc + 4;
 		} else if (ua_branch(mc, pc, w, &next) && ua_access(mc, *(const uint32_t *)(uintptr_t)(pc + 4))) {
