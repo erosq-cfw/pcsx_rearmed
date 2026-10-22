@@ -21,6 +21,11 @@ OFF=$W/libpcsxcore/mipsrec/offline
 export PATH=buildroot-2026.08/output/host/bin:$PATH
 QEMU="qemu-mipsel-static -L buildroot-2026.08/output/host/mipsel-buildroot-linux-musl/sysroot"
 mkdir -p $S
+# one hlink.sh per scratch dir: two runs sharing $S overwrite each other's
+# $S/t.bin between the A and B arms (2026-10-22: a rerun into a live bar's dir
+# made seed 395's B arm execute seed 10's program -- a fake "nondeterminism")
+exec 9>"$S/.hlink.lock"
+flock -n 9 || { echo "hlink.sh: $S is in use by another hlink.sh run"; exit 3; }
 if [ -z "${NOBUILD:-}" ]; then
   ( cd $W
     OBJS=$(ls libpcsxcore/*.o libpcsxcore/mipsrec/*.o | grep -v emu_if)
