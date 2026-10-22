@@ -267,6 +267,7 @@ static int ldhaz_pair(uint32_t w, uint32_t next)
 	return (opcodeGetReads(next) >> rt) & 1;
 }
 
+static int ldhaz_jit_on(void);
 static int ldhaz_scan(uint32_t start)
 {
 	for (uint32_t k = start, n = 0; n < 1024; k += 4, n++) {
@@ -279,8 +280,8 @@ static int ldhaz_scan(uint32_t start)
 			const uint32_t ds = ldhaz_word(k + 4);
 			if (!ldhaz_is_load(ds))
 				return 0;
-			if (is_branch && ldhaz_pair(ds, ldhaz_word(k + 8)))
-				return 1;                      /* not taken: the fall-through */
+			if (is_branch && !ldhaz_jit_on() && ldhaz_pair(ds, ldhaz_word(k + 8)))
+				return 1;                      /* not taken: the fall-through (else the JIT handles it) */
 			if (ldhaz_mode < 2)
 				return 0;
 			if (is_branch)
@@ -299,7 +300,7 @@ static int ldhaz_block(uint32_t pc)
 {
 	if (ldhaz_mode < 0) {
 		const char *e = getenv("EROSQ_LDHAZ");
-		ldhaz_mode = e ? atoi(e) : 0;   /* opt-in until the JIT-level fix (2026-10-22) */
+		ldhaz_mode = e ? atoi(e) : 1;   /* straight-line pairs; fall-throughs are the JIT's (EROSQ_LDHAZ_JIT) */
 		ldhaz_log = getenv("EROSQ_LDHAZ_LOG") != NULL;
 	}
 	return ldhaz_mode && ldhaz_scan(pc);
@@ -309,13 +310,17 @@ static int ldhaz_block(uint32_t pc)
  * conditional branch reads the load in its delay slot (EROSQ_LDHAZ_JIT,
  * default on; 0 disables) */
 static int ldhaz_jit = -1;
-extern "C" int mipsrec_ldhaz_ft_hazard(uint32_t ds, uint32_t ft)
+static int ldhaz_jit_on(void)
 {
 	if (ldhaz_jit < 0) {
 		const char *e = getenv("EROSQ_LDHAZ_JIT");
 		ldhaz_jit = e ? atoi(e) : 1;
 	}
-	return ldhaz_jit && ldhaz_is_load(ds) && ldhaz_pair(ds, ft);
+	return ldhaz_jit;
+}
+extern "C" int mipsrec_ldhaz_ft_hazard(uint32_t ds, uint32_t ft)
+{
+	return ldhaz_jit_on() && ldhaz_is_load(ds) && ldhaz_pair(ds, ft);
 }
 
 /* lui a0,hi(pc); jal mipsrec_ldhaz_run; ori a0,lo(pc) <BD>; j loop; move v1,zero <BD> */
