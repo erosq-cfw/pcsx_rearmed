@@ -18,7 +18,7 @@
 static int jitsched_inited, jitsched_on, jitsched_stat, blkext_stat;
 static unsigned long js_blocks, js_changed, js_regions;
 
-/* EROSQ_IDLESKIP (2026-10-22, offline prototype; default off). Guest spin loops
+/* EROSQ_IDLESKIP (2026-10-22; default ON since its device A/B). Guest spin loops
  * that only wait for the next event (IDLESIZE.md: Crash 44%, MGS 37%, Spyro 26%
  * of emulated cycles) are run in bulk instead of one iteration per dispatch:
  *   V  libetc VSync wait with timeout (Crash/Spyro/Ape): L = lw v0,16(sp);
@@ -116,7 +116,7 @@ static int idle_match(uint32_t pc, uint32_t *aux)
 static void idleskip_init(void)
 {
 	const char *e = getenv("EROSQ_IDLESKIP");
-	idleskip_on = e ? atoi(e) : 0;   /* default OFF until it wins an A/B */
+	idleskip_on = e ? atoi(e) : 1;   /* default ON (device A/B 10-22: MGS +8%, Spyro +5%, Ape +7%); EROSQ_IDLESKIP=0 is the kill-switch */
 	idleskip_stat = getenv("EROSQ_IDLESKIP_STAT") != NULL;
 	if (idleskip_on > 0) {
 		uintptr_t lo, hi;
