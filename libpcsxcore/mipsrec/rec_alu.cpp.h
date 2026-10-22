@@ -83,8 +83,10 @@ static void recADDIU()
  * destination is marked changed only after the word, so the dry run sees
  * the state the exception must expose. Constant operands that cannot
  * overflow keep the ADDU/ADDIU/SUBU paths and their const propagation. */
+extern "C" unsigned long mipsrec_ovf_sites;   /* jitsched.cpp: census (EROSQ_PROF) */
 static void recOvf(u32 word, u32 d, u32 s, u32 t, bool is_imm)
 {
+	mipsrec_ovf_sites++;
 	const u32 rs = regMipsToHost(s, REG_LOAD, REG_REGISTER);
 	const u32 rt = is_imm ? 0 : (t == s ? rs : regMipsToHost(t, REG_LOAD, REG_REGISTER));
 	const u32 rd = !d ? 0 : d == s ? rs : (!is_imm && d == t) ? rt : regMipsToHost(d, REG_FIND, REG_REGISTER);

@@ -534,6 +534,7 @@ static void ee_index(uint32_t *host, uint32_t gpc)
 static mcontext_t ee_ctx;
 static volatile int ee_pending;
 static int ee_mode = 1;
+extern "C" { unsigned long mipsrec_ovf_sites; }
 static unsigned long ee_exact_n, ee_ovf_n, ee_fb_n, ee_why[8], ee_emul, ee_hoist;
 extern "C" void ee_trap(void);
 asm(".pushsection .jitsched_text,\"ax\",@progbits\n"
@@ -903,8 +904,8 @@ chain:
 static void ua_report(void)
 {
 	fprintf(stderr, "unaligned: host %lu jit %lu undecoded %lu\n", ua_host, ua_jit, ua_bad);
-	fprintf(stderr, "unaligned: exact %lu (overflow %lu) fallback %lu index-peak %u blocks; emulated %lu hoisted %lu (why io %lu cmp %lu acc %lu alu %lu hoist %lu bios %lu chk %lu)\n",
-		ee_exact_n, ee_ovf_n, ee_fb_n, ee_peak, ee_emul, ee_hoist, ee_why[0], ee_why[1], ee_why[2], ee_why[3], ee_why[4], ee_why[5], ee_why[6]);
+	fprintf(stderr, "unaligned: exact %lu (overflow %lu; %lu trapping add/sub compiled) fallback %lu index-peak %u blocks; emulated %lu hoisted %lu (why io %lu cmp %lu acc %lu alu %lu hoist %lu bios %lu chk %lu)\n",
+		ee_exact_n, ee_ovf_n, mipsrec_ovf_sites, ee_fb_n, ee_peak, ee_emul, ee_hoist, ee_why[0], ee_why[1], ee_why[2], ee_why[3], ee_why[4], ee_why[5], ee_why[6]);
 }
 
 extern "C" void mipsrec_ua_report(void) { ua_report(); }   /* offline harness */
