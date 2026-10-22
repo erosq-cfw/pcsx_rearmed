@@ -362,6 +362,134 @@ static void cio_install(void)
 
 extern "C" void mipsrec_cio_stats(unsigned long *runs, unsigned long *blocks) { *runs = cio_runs; *blocks = cio_blocks; }
 
+/* Unaligned host accesses (2026-10-22, step 1 of the exact guest AdEL/AdES
+ * work). The kernel fixes unaligned user loads/stores up silently by default
+ * (TIF_FIXADE); the emu thread turns that off (sysmips MIPS_FIXADE 0) so every
+ * one arrives here as SIGBUS. This handler emulates the access exactly as the
+ * kernel fixup does (step pc; when pc is a branch the access sat in its delay
+ * slot: emulate the branch too) and counts it: host C code (packed structs,
+ * plugins, libc) keeps working, and the counts show who does it
+ * (EROSQ_PROF prints them at exit). Faults inside the JIT code cache are
+ * guest unaligned accesses; until the exact AdEL/AdES path exists they get
+ * the same kernel-equivalent completion and are counted as "jit". Signal-safe:
+ * only context reads/writes. */
+#include <sys/syscall.h>
+#include <unistd.h>
+static struct sigaction ua_prev;
+static unsigned long ua_host, ua_jit, ua_bad;
+static uintptr_t ua_jlo, ua_jhi;
+
+static inline uint32_t ua_rd(const greg_t *g, int r) { return r ? (uint32_t)g[r] : 0; }
+static inline void ua_wr(greg_t *g, int r, uint32_t v) { if (r) g[r] = (greg_t)(int32_t)v; }
+static inline uint32_t *ua_fpr(mcontext_t *mc, int i) { return (uint32_t *)&mc->fpregs.fp_r.fp_dregs[i]; }   /* o32 FR=0: low word */
+
+/* emulate the load/store word w at address a; 0 = not a handled access */
+static int ua_access(mcontext_t *mc, uint32_t w)
+{
+	greg_t *g = mc->gregs;
+	const int op = w >> 26, rs = (w >> 21) & 31, rt = (w >> 16) & 31;
+	uint8_t *a = (uint8_t *)(uintptr_t)(ua_rd(g, rs) + (uint32_t)(int32_t)(int16_t)w);
+	uint32_t v;
+	switch (op) {
+	case 0x21: ua_wr(g, rt, (uint32_t)(int32_t)(int16_t)(a[0] | a[1] << 8)); return 1;            /* lh  */
+	case 0x25: ua_wr(g, rt, (uint32_t)(a[0] | a[1] << 8)); return 1;                               /* lhu */
+	case 0x23: ua_wr(g, rt, (uint32_t)a[0] | a[1] << 8 | a[2] << 16 | (uint32_t)a[3] << 24); return 1;  /* lw */
+	case 0x29: v = ua_rd(g, rt); a[0] = v; a[1] = v >> 8; return 1;                               /* sh  */
+	case 0x2b: v = ua_rd(g, rt); a[0] = v; a[1] = v >> 8; a[2] = v >> 16; a[3] = v >> 24; return 1;   /* sw */
+	case 0x31: *ua_fpr(mc, rt) = (uint32_t)a[0] | a[1] << 8 | a[2] << 16 | (uint32_t)a[3] << 24; return 1;  /* lwc1 */
+	case 0x39: v = *ua_fpr(mc, rt); a[0] = v; a[1] = v >> 8; a[2] = v >> 16; a[3] = v >> 24; return 1;     /* swc1 */
+	case 0x35:                                                                                     /* ldc1 */
+		*ua_fpr(mc, rt) = (uint32_t)a[0] | a[1] << 8 | a[2] << 16 | (uint32_t)a[3] << 24;
+		*ua_fpr(mc, rt | 1) = (uint32_t)a[4] | a[5] << 8 | a[6] << 16 | (uint32_t)a[7] << 24;
+		return 1;
+	case 0x3d:                                                                                     /* sdc1 */
+		v = *ua_fpr(mc, rt); a[0] = v; a[1] = v >> 8; a[2] = v >> 16; a[3] = v >> 24;
+		v = *ua_fpr(mc, rt | 1); a[4] = v; a[5] = v >> 8; a[6] = v >> 16; a[7] = v >> 24;
+		return 1;
+	}
+	return 0;
+}
+
+/* branch/jump at pc (word w): 1 + *next = pc after it and its delay slot
+ * (incl. link-register writes); 0 = not a branch */
+static int ua_branch(mcontext_t *mc, uint32_t pc, uint32_t w, uint32_t *next)
+{
+	greg_t *g = mc->gregs;
+	const int op = w >> 26, rs = (w >> 21) & 31, rt = (w >> 16) & 31, fn = w & 63;
+	const int32_t s = (int32_t)ua_rd(g, rs), t = (int32_t)ua_rd(g, rt);
+	const uint32_t tgt = pc + 4 + ((uint32_t)(int32_t)(int16_t)w << 2), fall = pc + 8;
+	int take;
+	switch (op) {
+	case 0x00:
+		if (fn == 0x08) { *next = (uint32_t)s; return 1; }                                  /* jr */
+		if (fn == 0x09) { ua_wr(g, (w >> 11) & 31, fall); *next = (uint32_t)s; return 1; }  /* jalr (rs read first) */
+		return 0;
+	case 0x01:
+		take = (rt & 1) ? s >= 0 : s < 0;                                                   /* bltz/bgez(+al/l) */
+		if (rt & 0x10) ua_wr(g, 31, fall);
+		*next = take ? tgt : fall; return 1;   /* likely variants never fault in their slot when not taken */
+	case 0x02: *next = (pc & 0xf0000000) | ((w & 0x03ffffff) << 2); return 1;               /* j */
+	case 0x03: ua_wr(g, 31, fall); *next = (pc & 0xf0000000) | ((w & 0x03ffffff) << 2); return 1;   /* jal */
+	case 0x04: case 0x14: *next = s == t ? tgt : fall; return 1;                            /* beq(l) */
+	case 0x05: case 0x15: *next = s != t ? tgt : fall; return 1;                            /* bne(l) */
+	case 0x06: case 0x16: *next = s <= 0 ? tgt : fall; return 1;                            /* blez(l) */
+	case 0x07: case 0x17: *next = s > 0 ? tgt : fall; return 1;                             /* bgtz(l) */
+	case 0x11:
+		if (rs == 0x08) {                                                                   /* bc1f/bc1t(l) */
+			const int cc = (mc->fpc_csr >> 23) & 1;
+			*next = (((w >> 16) & 1) ? cc : !cc) ? tgt : fall; return 1;
+		}
+		return 0;
+	}
+	return 0;
+}
+
+static void ua_sigbus(int sig, siginfo_t *si, void *ucv)
+{
+	ucontext_t *uc = (ucontext_t *)ucv;
+	mcontext_t *mc = &uc->uc_mcontext;
+	const uint32_t pc = (uint32_t)mc->pc;
+	if (pc && !(pc & 3)) {
+		const uint32_t w = *(const uint32_t *)(uintptr_t)pc;
+		uint32_t next;
+		if (ua_access(mc, w)) {
+			mc->pc = pc + 4;
+		} else if (ua_branch(mc, pc, w, &next) && ua_access(mc, *(const uint32_t *)(uintptr_t)(pc + 4))) {
+			mc->pc = next;   /* the access was in the branch's delay slot (EPC = branch) */
+		} else {
+			ua_bad++;
+			goto chain;
+		}
+		if (pc >= ua_jlo && pc < ua_jhi) ua_jit++; else ua_host++;
+		return;
+	}
+chain:
+	if ((ua_prev.sa_flags & SA_SIGINFO) && ua_prev.sa_sigaction) { ua_prev.sa_sigaction(sig, si, ucv); return; }
+	if (ua_prev.sa_handler == SIG_IGN) return;
+	signal(SIGBUS, SIG_DFL);
+}
+
+static void ua_report(void)
+{
+	fprintf(stderr, "unaligned: host %lu jit %lu undecoded %lu\n", ua_host, ua_jit, ua_bad);
+}
+
+static void ua_install(void)
+{
+	mipsrec_code_range(&ua_jlo, &ua_jhi);
+	struct sigaction sa;
+	memset(&sa, 0, sizeof sa);
+	sa.sa_sigaction = ua_sigbus;
+	sa.sa_flags = SA_SIGINFO;
+	sigemptyset(&sa.sa_mask);
+	sigaction(SIGBUS, &sa, &ua_prev);
+	syscall(__NR_sysmips, 7 /* MIPS_FIXADE */, 0, 0);   /* this (emu) thread only; ENOSYS under qemu-user (SIGBUS there anyway) */
+	if (getenv("EROSQ_PROF"))
+		atexit(ua_report);
+}
+
+extern "C" void mipsrec_unaligned_stats(unsigned long *host, unsigned long *jit, unsigned long *bad) { *host = ua_host; *jit = ua_jit; *bad = ua_bad; }
+
 static void jitsched_init(void)
 {
 	jitsched_inited = 1;
@@ -371,6 +499,7 @@ static void jitsched_init(void)
 	blkext_stat = getenv("EROSQ_BLKEXT_STAT") != NULL;
 	idleskip_init();
 	cio_install();
+	ua_install();
 	if (jitsched_on > 0)
 		fprintf(stderr, "mipsrec: jitsched on\n");   /* stderr: unbuffered, survives SIGTERM */
 }
