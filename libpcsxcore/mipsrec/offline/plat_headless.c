@@ -44,7 +44,7 @@ void mipsrec_debug_regions(uintptr_t *v) __attribute__((weak));
 void mipsrec_idleskip_report(void) __attribute__((weak));
 void mipsrec_ua_report(void) __attribute__((weak));
 
-int g_prof_on;
+int g_prof_on, g_prof_print;   /* plat_erosq.c twins (EROSQ_PROF; PROF-light 2056a2b) */
 unsigned long long g_prof_gpu_ns, g_prof_present_ns, g_prof_spu_ns;
 volatile int g_erosq_phase;
 static uint16_t *fb, *menu_fb;
