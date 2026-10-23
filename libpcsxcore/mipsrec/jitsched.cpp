@@ -601,7 +601,7 @@ static int ldhaz_block(uint32_t pc)
 {
 	if (ldhaz_mode < 0) {
 		const char *e = getenv("EROSQ_LDHAZ");
-		ldhaz_mode = e ? atoi(e) : 1;   /* straight-line pairs; fall-throughs are the JIT's (EROSQ_LDHAZ_JIT) */
+		ldhaz_mode = e ? atoi(e) : 0;   /* variant (i): default OFF (output == shipped); 1 = straight-line pairs */
 		ldhaz_log = getenv("EROSQ_LDHAZ_LOG") != NULL;
 	}
 	return ldhaz_mode && ldhaz_scan(pc);
@@ -615,7 +615,7 @@ static int ldhaz_jit_on(void)
 {
 	if (ldhaz_jit < 0) {
 		const char *e = getenv("EROSQ_LDHAZ_JIT");
-		ldhaz_jit = e ? atoi(e) : 1;
+		ldhaz_jit = e ? atoi(e) : 0;   /* variant (i): default OFF */
 	}
 	return ldhaz_jit;
 }
