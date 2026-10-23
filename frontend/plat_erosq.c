@@ -38,6 +38,7 @@
  * the per-second split. ns via CLOCK_MONOTONIC. Stripped after the perf hunt. */
 #include <time.h>
 int g_prof_on;
+int g_prof_print;   /* EROSQ_PROF set: per-second PROF lines (vsps); g_prof_on adds the per-call ns timing */
 unsigned long long g_prof_gpu_ns, g_prof_present_ns, g_prof_spu_ns;
 unsigned long long prof_now_ns(void)
 {
@@ -397,7 +398,11 @@ void plat_init(void)
 
 	fault_init();
 	signal(SIGUSR1, shot_handler);   /* ponytail: kill -USR1 -> shot.ppm */
-	g_prof_on = getenv("EROSQ_PROF") ? 1 : 0;
+	/* EROSQ_PROF=2 (PROF-light): the per-second vsps lines only. The per-call
+	 * gpu/present/spu ns timing of EROSQ_PROF=1 costs ~108k clock_gettime
+	 * syscalls/s on this kernel (no vDSO clocksource), so A/Bs use =2 */
+	g_prof_print = getenv("EROSQ_PROF") != NULL;
+	g_prof_on = g_prof_print && atoi(getenv("EROSQ_PROF")) != 2;
 	sampler_init();
 	gov_pin_performance();
 

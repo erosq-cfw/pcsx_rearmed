@@ -29,7 +29,7 @@
 #include "main.h"
 
 /* ponytail: coarse frame-phase profiler, defined in plat_erosq.c */
-extern int g_prof_on;
+extern int g_prof_on, g_prof_print;
 extern unsigned long long g_prof_gpu_ns, g_prof_present_ns, g_prof_spu_ns;
 #include "plat.h"
 #include "pcnt.h"
@@ -960,7 +960,7 @@ void pl_frame_limit(void)
 				fprintf(stderr, "FPSLOG flips=%d vsps=%.1f\n",
 					pl_rearmed_cbs.flip_cnt, pl_rearmed_cbs.vsps_cur);
 		}
-		if (g_prof_on && diff > 0) { /* coarse frame-phase split over this 1s window */
+		if (g_prof_print && diff > 0) { /* coarse frame-phase split over this 1s window (zeros under EROSQ_PROF=2) */
 			double win = (double)diff * 1000.0; /* us->ns */
 			double gpu = (double)g_prof_gpu_ns, pres = (double)g_prof_present_ns;
 			double spu = (double)g_prof_spu_ns;
