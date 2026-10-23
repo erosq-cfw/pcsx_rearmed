@@ -234,7 +234,7 @@ static void idleskip_init(void)
 	idleskip_stat = getenv("EROSQ_IDLESKIP_STAT") != NULL;
 	{
 		const char *e2 = getenv("EROSQ_IDLESKIP2");
-		idleskip2_on = e2 ? atoi(e2) : 0;   /* round 2: default off until its device A/B */
+		idleskip2_on = e2 ? atoi(e2) : 1;   /* round 2: default ON (10-23: bit-exact, ~+1% Tekken 3 fight, never negative); kill EROSQ_IDLESKIP2=0 */
 	}
 	if (idleskip_on > 0) {
 		uintptr_t lo, hi;
