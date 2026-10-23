@@ -434,7 +434,7 @@ static int cs368_mxu_on(void)
 	static int on = -1;
 	if (on < 0) {
 		const char *e = getenv("EROSQ_CS368");
-		on = e && atoi(e) > 0;
+		on = e ? atoi(e) > 0 : 1;   /* default ON (10-23: device pixel gate identical, Tekken 3 fight +3.3%); kill EROSQ_CS368=0 */
 	}
 	return on;
 }
