@@ -1,8 +1,8 @@
 /*
  * erosq perf/gte-rtp: bit-exact fast RTPS/RTPT (sf=1, lm=0) for the X1000,
  * selected at startup by EROSQ_GTERTP (see gtertp_select() at the end):
- *   0 / unset  off: mipsrec keeps gte.c's handlers (dispatch as before)
- *   1          fast RTPS + fast RTPT, vertex loop unrolled
+ *   0          off: mipsrec keeps gte.c's handlers (dispatch as before) -- kill switch
+ *   1 / unset fast RTPS + fast RTPT, vertex loop unrolled (default since RC-E)
  *   2          fast RTPS + fast RTPT, vertex loop rolled (smaller, I-cache)
  * Built only into mipsrec builds, as the LAST object (Makefile), so all of its
  * code lands after every pre-existing .text symbol: the PGO layout of the
@@ -294,7 +294,7 @@ static void __attribute__((constructor, section(".text.gtertp_sel"))) gtertp_sel
 {
 	const char *e = getenv("EROSQ_GTERTP");
 	gte_handler *rtpt;
-	int m = e ? atoi(e) : 0;
+	int m = e ? atoi(e) : 1;  /* RC-E: unset = on (unrolled); EROSQ_GTERTP=0 is the kill switch */
 
 	if (m != 1 && m != 2) {
 		if (m)
