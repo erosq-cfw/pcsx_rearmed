@@ -605,6 +605,10 @@ int main(int argc, char *argv[])
 	int opt_nolimit = 0;
 	int i;
 
+	/* erosq: stdout to a file is block-buffered and SignalExit/_exit or a
+	 * kill drops the tail (lost "CD-ROM ID" lines in bench logs) */
+	setvbuf(stdout, NULL, _IOLBF, 0);
+
 	emu_core_preinit();
 
 	// read command line options
