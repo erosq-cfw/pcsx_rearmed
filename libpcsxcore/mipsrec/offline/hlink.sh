@@ -29,7 +29,8 @@ exec 9>"$S/.hlink.lock"
 flock -n 9 || { echo "hlink.sh: $S is in use by another hlink.sh run"; exit 3; }
 if [ -z "${NOBUILD:-}" ]; then
   ( cd $W
-    OBJS=$(ls libpcsxcore/*.o libpcsxcore/mipsrec/*.o | grep -v emu_if)
+    # gte_rtp.o last, as in the Makefile: its EROSQ_GTERTP selector constructor must run after plugin.o's
+    OBJS="$(ls libpcsxcore/*.o libpcsxcore/mipsrec/*.o | grep -v 'emu_if\|gte_rtp') $(ls libpcsxcore/gte_rtp.o 2>/dev/null)"
     mipsel-buildroot-linux-musl-gcc -O2 -DNO_PNG -Iinclude -Ilibpcsxcore -fno-pic -mno-abicalls -G0 -c $OFF/hlink.c -o $S/hlink.o &&
     mipsel-buildroot-linux-musl-gcc -O2 -fno-pic -mno-abicalls -G0 -c $OFF/stubs.c -o $S/stubs.o &&
     mipsel-buildroot-linux-musl-g++ -no-pie -Wl,--gc-sections -o $S/hlink $S/hlink.o $S/stubs.o $OBJS -lz -lm -lpthread 2>$S/link.err ) || { echo "build failed"; cat $S/link.err | grep -v abicalls | head; exit 1; }
