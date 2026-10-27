@@ -5,6 +5,6 @@
  * (augments the default linker script). */
 SECTIONS
 {
-  .jitsched : { *(.jitsched_text) *(.jitsched_rodata) }
+  .jitsched : { *(.jitsched_text) *(.jitsched_rodata) *(.jitsched_text_tail) *(.jitsched_rodata_tail) }
 }
 INSERT AFTER .plt;

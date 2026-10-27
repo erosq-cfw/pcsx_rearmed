@@ -1679,3 +1679,21 @@ extern "C" int __wrap_drm_present(void)
 	}
 	return __real_drm_present ? __real_drm_present() : 0;
 }
+
+/* EROSQ_JRLD / EROSQ_NCLIPJ (perf/jrld-nclip, 2026-10-23): read once at
+ * process start, default ON; =0 restores the previous codegen of that
+ * feature exactly. Consumed at compile time by opcodes.h recJR_jrld() /
+ * recNCLIP_inl(). Code in .jitsched_text_tail (jitsched.ld: after all
+ * existing .jitsched code/rodata) and two bss ints at the end of this file,
+ * so no pre-existing symbol moves. */
+#define JRN_TAIL __attribute__((section(".jitsched_text_tail")))
+static int jrld_on, nclipj_on;
+static JRN_TAIL __attribute__((constructor)) void jrn_env_init(void)
+{
+	const char *j = getenv("EROSQ_JRLD"), *n = getenv("EROSQ_NCLIPJ");
+	jrld_on = j ? atoi(j) : 1;
+	nclipj_on = n ? atoi(n) : 1;
+	fprintf(stderr, "mipsrec: jrld=%d nclipj=%d\n", jrld_on, nclipj_on);
+}
+extern "C" JRN_TAIL int mipsrec_jrld_on(void)   { return jrld_on; }
+extern "C" JRN_TAIL int mipsrec_nclipj_on(void) { return nclipj_on; }
