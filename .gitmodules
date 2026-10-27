@@ -1,6 +1,7 @@
 [submodule "libpicofe"]
 	path = frontend/libpicofe
-	url = https://github.com/notaz/libpicofe.git
+	url = https://github.com/erosq-cfw/libpicofe
+	branch = erosq-pcsx
 [submodule "warm"]
 	path = frontend/warm
 	url = https://github.com/notaz/warm.git
@@ -12,7 +13,8 @@
 	url = https://github.com/pcercuei/lightrec.git
 [submodule "deps/lightning"]
 	path = deps/lightning
-	url = https://github.com/notaz/gnu_lightning.git
+	url = https://github.com/erosq-cfw/gnu_lightning
+	branch = erosq-x1000
 [submodule "deps/libretro-common"]
 	path = deps/libretro-common
 	url = https://github.com/libretro/libretro-common.git
