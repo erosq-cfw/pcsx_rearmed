@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: MIT
+ * Copyright (c) 2026 erosqcfw */
 #ifndef MIPSREC_COMPAT_H
 #define MIPSREC_COMPAT_H
 /* Bridges pcsx4all mipsrec expectations onto rearmed's core.

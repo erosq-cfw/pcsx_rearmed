@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: MIT
+ * Copyright (c) 2026 erosqcfw */
 /*
  * exactexc.h -- shared between recompiler.cpp and jitsched.cpp: the dry-run
  * recompile that exact guest AdEL/AdES needs (EROSQ, 2026-10-22).

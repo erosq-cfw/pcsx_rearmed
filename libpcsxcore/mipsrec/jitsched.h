@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: MIT
+ * Copyright (c) 2026 erosqcfw */
 /*
  * jitsched.h -- post-emission list scheduler for one mipsrec block (EROSQ).
  *

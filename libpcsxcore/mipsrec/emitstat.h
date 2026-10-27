@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: MIT
+ * Copyright (c) 2026 erosqcfw */
 /* EROSQ: EROSQ_EMITSTAT=1 -- where do the bytes of the JIT code cache go?
  *
  * The X1000 I-cache is capacity-bound and the JIT code cache is >=29% of

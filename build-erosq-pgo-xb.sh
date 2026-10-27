@@ -15,10 +15,24 @@ cd "$(dirname "$0")"
 # PROF_DIR=<dir> uses (or, with PGO_GEN=1, records into) another profile dir,
 # e.g. pgo-profile-retrain/ -- the checked-in pgo-profile/ stays untouched.
 # PGO_GEN=1: instrumented build (pgo-profile/README.md step 1).
+# pgo-profile/ stores each .gcda under its repo-relative object path ('/' -> '#').
+# gcc looks profiles up by the mangled ABSOLUTE object path, so stage a copy
+# named for this checkout. (After recording with PGO_GEN=1, strip the
+# "$(pwd | tr / '#')#" prefix before checking new profiles in.)
+stage_prof() {
+	STAGED_PROF=$(mktemp -d "${TMPDIR:-/tmp}/pcsx-pgo.XXXXXX")
+	trap 'rm -rf "$STAGED_PROF"' EXIT
+	M=$(pwd | tr / '#')
+	for f in "$1"/*.gcda; do
+		b=$(basename "$f")
+		case $b in \#*) cp "$f" "$STAGED_PROF/$b" ;; *) cp "$f" "$STAGED_PROF/$M#$b" ;; esac
+	done
+}
 PROF="$(pwd)/${PROF_DIR:-pgo-profile}"
 if [ -z "$PGO_GEN" ]; then
 	[ -d "$PROF" ] && [ "$(ls "$PROF"/*.gcda 2>/dev/null | wc -l)" -gt 0 ] || {
 		echo "no profile in $PROF -- see pgo-profile/README.md to regenerate"; exit 1; }
+	stage_prof "$PROF"
 fi
 
 # USE_ASYNC_CDROM=1 here too: it enables USE_RTHREADS, whose objects are only in
@@ -33,7 +47,7 @@ if [ -n "$PGO_GEN" ]; then
 	echo "=== PGO INSTRUMENTED BUILD -> $PROF ==="
 else
 make -j"$(nproc)" USE_ASYNC_CDROM=1 \
-	CFLAGS_OPT="-Ofast -B$XB_CC1_DIR/ -fprofile-use=$PROF -fprofile-partial-training -fprofile-correction -Wno-error=coverage-mismatch -Wno-coverage-mismatch --param max-unroll-times=2"
+	CFLAGS_OPT="-Ofast -B$XB_CC1_DIR/ -fprofile-use=$STAGED_PROF -fprofile-partial-training -fprofile-correction -Wno-error=coverage-mismatch -Wno-coverage-mismatch --param max-unroll-times=2"
 echo "=== PGO BUILD RESULT ==="
 fi
 ls -la pcsx && file pcsx

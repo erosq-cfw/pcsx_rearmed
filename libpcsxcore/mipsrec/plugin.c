@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: MIT
+ * Copyright (c) 2026 erosqcfw */
 #include "../r3000a.h"
 #include "../psxmem.h"
 #include "../psxcounters.h"

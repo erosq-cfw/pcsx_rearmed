@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: MIT
+ * Copyright (c) 2026 erosqcfw */
 /*
  * jitsched.cpp -- mipsrec code that must not move existing code or data:
  * EROSQ_JITSCHED glue for the block scheduler (jitsched.h), the offline test
