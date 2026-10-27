@@ -1,12 +1,13 @@
 #!/bin/bash
 # jrld.sh -- EROSQ_JRLD fixture (perf/jrld-nclip, 2026-10-23): jr / jalr with a
 # load in the delay slot, JIT vs interpreter, both switch states.
-# For each KIND (jr, jalr rd=ra, jalr rd=t5) x CASE (gen_jrld.py: target reads
+# For each KIND (jr, jalr rd=ra, jalr rd=t5, jalr rd=rs=t2) x CASE (gen_jrld.py: target reads
 # rt / reads+writes rt (load skipped) / writes rt / ignores rt / branch, jump,
 # jr at the target / unmapped target / AdEL load / rt == jump reg / base ==
 # jump reg / lb lhu lwl lwr / rt == $zero / link == rt / SMC rewrite of the
 # target between two passes of the same compiled jump block / I/O load /
-# BIOS target (hlink HX_ROMLOOP)),
+# BIOS target (hlink HX_ROMLOOP) / load base == link reg / rt == link reg
+# read by the target),
 # runs the program through hlink in four arms:
 #   j1 EROSQ_JRLD=1   j0 EROSQ_JRLD=0   (JIT, faultmem on; FM=0 for off)
 #   ix interpreter with exact AdEL (HX_EXACT=1)   i interpreter as configured
@@ -34,11 +35,15 @@ fi
 # the AdEL load in a jr delay slot: the helper interprets it with the
 # interpreter's non-exact table (aligned-down read, no exception); the native
 # path raises the exact AdEL as every other JIT load does.
-EXPECT_J1_NE_J0=${EXPECT_J1_NE_J0:-"jr:adel"}
-CASES="reads readwrite writes ignores immcoll branch jump jrtarget unmapped adel rtisrs baseisrs lb lhu lwl lwr rtzero linkisrt linkisrt5 smc io rom"
+# jalr (rd = ra / t5 / rs): the old recJALR let the target's first word see
+# the NEW rt; with the fix it sees the old one (or the link) like the
+# interpreter, so j1 differs from j0 and must equal ix.
+JALR_FIXED="reads readwrite rtisrs smc rom linkread"
+EXPECT_J1_NE_J0=${EXPECT_J1_NE_J0:-"jr:adel $(for k in jalr jalrt jalrs; do for c in $JALR_FIXED; do printf '%s:%s ' $k $c; done; done)"}
+CASES="reads readwrite writes ignores immcoll branch jump jrtarget unmapped adel rtisrs baseisrs lb lhu lwl lwr rtzero linkisrt linkisrt5 smc io rom baseislink linkread"
 key() { echo "$1" | awk '/^STATE/{print $2, $3, $9}'; }
 pass=0; fail=0; n=0; jsame=0; jdiff=0
-for kind in jr jalr jalrt; do
+for kind in jr jalr jalrt jalrs; do
   for c in $CASES; do
     python3 $OFF/gen_jrld.py $kind $c > $S/t.S &&
     mipsel-buildroot-linux-musl-gcc -mips1 -msoft-float -mno-abicalls -fno-pic -G0 -c $S/t.S -o $S/t.o 2>$S/as.err &&

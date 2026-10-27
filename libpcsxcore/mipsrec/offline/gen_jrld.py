@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # gen_jrld.py KIND CASE -- one jrld.sh fixture (EROSQ_JRLD, 2026-10-23):
 # a jr/jalr with a load in its delay slot, followed at the jump target by the
-# CASE's first instruction. KIND: jr | jalr (rd = ra) | jalrt (rd = t5).
+# CASE's first instruction. KIND: jr | jalr (rd = ra) | jalrt (rd = t5) |
+# jalrs (rd = rs = t2).
 # The load is 'lw t0, 4(a1)' unless the case says otherwise; t0 starts as
 # 0x11111111, so every case shows whether the target saw the old or new t0.
 # An exception handler copied to 0x80000080 records EPC, Cause & 0x8000007c,
@@ -38,10 +39,16 @@ cases = {
     'linkisrt5':  dict(load='lw $t5, 4($a1)'),
     'smc':        dict(smc=True),                                # target rewritten between two passes
     'io':         dict(load='lw $t0, 0x1070($a2)'),              # I_STAT read through the delay slot
+    'baseislink': dict(load='lw $t0, 0(LINK)'),                 # load base == link reg: reads the link (jalr) / old value (jr)
+    'linkread':   dict(load='lw LINK, 4($a1)', first='addu $t1, LINK, $zero'), # rt == link reg, target reads it: sees the link, then the load commits
     'rom':        dict(load='lw $s7, 0x7f0($a1)', tgt='0xbfc01000', pre='addiu $s7, $zero, 5'), # BIOS target (hlink HX_ROMLOOP: 'addiu s7,s7,-1'; s7 5, loads 0): case 1 -> helper;
                                                                  # its RAM alias (psxM+0x1c1000) is 0: a missing RAM check goes native
 }
-c = cases[case]
+c = dict(cases[case])
+LINKREG = {'jr': '$ra', 'jalr': '$ra', 'jalrt': '$t5', 'jalrs': TARGET}[kind]
+for k in ('load', 'first'):
+    if k in c:
+        c[k] = c[k].replace('LINK', LINKREG)
 FIRST = c.get('first', FIRST)
 LOAD = c.get('load', LOAD)
 TGT = c.get('tgt', TGT)
@@ -53,6 +60,8 @@ elif kind == 'jalr':
     JUMP = 'jalr %s' % TARGET
 elif kind == 'jalrt':
     JUMP = 'jalr $t5, %s' % TARGET
+elif kind == 'jalrs':
+    JUMP = '.word 0x01405009'                            # jalr $t2, $t2 (rd == rs, gas refuses it): jumps to the old rs
 else:
     sys.exit('bad kind')
 

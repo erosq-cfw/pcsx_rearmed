@@ -92,8 +92,17 @@ static REC_CANON void recBREAK_exc()
  * SMC: the guard re-reads the target word on every execution, so a block
  * compiled before the target was (re)written can never take the native path
  * on a stale word -- no compile-time copy of the target is ever used.
- * jalr has no load-delay helper (recJALR always compiles its delay slot
- * natively), so it is unchanged. EROSQ_JRLD=0: recJR exactly as before. */
+ * jalr (2026-10-23, same switch): recJALR compiled such a delay slot
+ * natively with no load delay, so a target whose first word reads the load's
+ * rt saw the NEW value (interpreter: old). recJALR_jrld sends it through the
+ * same guard + helper. Link first, in interpreter order (psxJALR: rs read,
+ * then rd = pc+8, then the delay slot): the jump target is captured
+ * (REG_LOADBRANCH copy) before rd is written, so rd == rs jumps to the old rs;
+ * rd is stored to psxRegs before the guard, so both paths, the load's base
+ * (base == rd reads the link) and the helper's interpreted target word
+ * (rd == rt: the target reads the link, then the load commits) all see it.
+ * Plain jalr (no load / rt == 0) and EROSQ_JRLD=0: recJALR exactly as before.
+ * EROSQ_JRLD=0: recJR exactly as before. */
 extern "C" int mipsrec_jrld_on(void);    /* jitsched.cpp */
 extern "C" int mipsrec_nclipj_on(void);  /* jitsched.cpp */
 /* The original emitters are reached through volatile pointers: a direct call
@@ -101,20 +110,23 @@ extern "C" int mipsrec_nclipj_on(void);  /* jitsched.cpp */
  * from .text) and re-place recNCLIP, moving every pre-existing symbol. */
 static void (*const volatile recJR_orig)() __attribute__((section(".jitsched_rodata_tail"))) = recJR;
 static void (*const volatile recNCLIP_orig)() __attribute__((section(".jitsched_rodata_tail"))) = recNCLIP;
+static void (*const volatile recJALR_orig)() __attribute__((section(".jitsched_rodata_tail"))) = recJALR;
 /* new code goes after every existing .jitsched symbol (jitsched.ld) */
 #define REC_TAIL __attribute__((section(".jitsched_text_tail"), noinline))
 
-static REC_TAIL void recJR_jrld()
+/* jr (link_rd < 0) or jalr (link_rd = its rd, 0 = no link) with a GPR load,
+ * rt != 0, in the delay slot. For jr the emitted code is unchanged. */
+static REC_TAIL void recJRLD_emit(const int link_rd, const u32 lrt)
 {
-	const u32 ds = OPCODE_AT(pc), op = ds >> 26, lrt = _fRt_(ds);
-	if (!mipsrec_jrld_on() || op < 0x20 || op > 0x26 || lrt == 0) {
-		recJR_orig();
-		return;
-	}
-
 	/* as recJR_load_delay: flush, then a private copy of the target */
 	regClearJump();
 	const u32 br1 = regMipsToHost(_Rs_, REG_LOADBRANCH, REG_REGISTERBRANCH);
+	if (link_rd > 0) {
+		/* jalr link: after the target copy, before the delay slot */
+		emitJumpAndLinkReturnAddress(TEMP_0, pc + 4);
+		SW(TEMP_0, PERM_REG_1, offGPR(link_rd));
+		SetConst(link_rd, pc + 4);
+	}
 	u32 *fix[8];
 	int nfix = 0;
 
@@ -206,6 +218,32 @@ static REC_TAIL void recJR_jrld()
 	end_block = 1;
 }
 
+static inline __attribute__((always_inline)) u32 jrld_slot_rt(void)
+{
+	const u32 ds = OPCODE_AT(pc), op = ds >> 26;
+	return op < 0x20 || op > 0x26 ? 0 : _fRt_(ds);   /* lb..lwr */
+}
+
+static REC_TAIL void recJR_jrld()
+{
+	const u32 lrt = jrld_slot_rt();
+	if (!mipsrec_jrld_on() || lrt == 0) {
+		recJR_orig();
+		return;
+	}
+	recJRLD_emit(-1, lrt);
+}
+
+static REC_TAIL void recJALR_jrld()
+{
+	const u32 lrt = jrld_slot_rt();
+	if (!mipsrec_jrld_on() || lrt == 0) {
+		recJALR_orig();
+		return;
+	}
+	recJRLD_emit(_Rd_, lrt);
+}
+
 /* EROSQ_NCLIPJ (perf/jrld-nclip, 2026-10-23): GTE NCLIP inline instead of
  * JAL gte_h_NCLIP. Exactly gte.c gteNCLIP_ (the handler CP2_FUNC_0 picks):
  *   MAC0 = (s64)SX0*(SY1-SY2) + SX1*(SY2-SY0) + SX2*(SY0-SY1), truncated
@@ -282,7 +320,7 @@ void (*recBSC[64])() =
 void (*recSPC[64])() =
 {
 	recSLL , recNULL, recSRL , recSRA , recSLLV   , recNULL , recSRLV, recSRAV,
-	recJR_jrld, recJALR, recNULL, recNULL, recSYSCALL, recBREAK_exc, recNULL, recNULL,
+	recJR_jrld, recJALR_jrld, recNULL, recNULL, recSYSCALL, recBREAK_exc, recNULL, recNULL,
 	recMFHI, recMTHI, recMFLO, recMTLO, recNULL   , recNULL , recNULL, recNULL,
 	recMULT, recMULTU, recDIV, recDIVU, recNULL   , recNULL , recNULL, recNULL,
 	recADD , recADDU, recSUB , recSUBU, recAND    , recOR   , recXOR , recNOR ,
