@@ -351,6 +351,42 @@ GTE_SHIM0_LM1(AVSZ4, GTEOP_AVSZ4)   /* lm inert (no gteIR clamp) */
 GTE_SHIM0_LM0(RTPT,  GTEOP_RTPT)    /* lm=0: gte.cpp:450-452 */
 GTE_SHIM0_LM1(NCCT,  GTEOP_NCCT)
 
+#ifdef EROSQ_GTE_CAPTURE
+/* DIAGNOSTIC BUILDS ONLY (perf/gte-rtp differential corpus): with
+ * EROSQ_GTE_CAP=<file>, dump the full CP2 state (+ op tag) at RTPS/RTPT entry
+ * for every EROSQ_GTE_CAP_EVERY-th call, at most EROSQ_GTE_CAP_N records.
+ * Wraps the baked handler pointers before the JIT reads them. */
+#include <stdio.h>
+#include <stdlib.h>
+static FILE *gcap_fp;
+static unsigned long gcap_n, gcap_max = 300000, gcap_every = 1, gcap_cnt;
+static gte_handler *gcap_rtps, *gcap_rtpt;
+static void gcap(psxCP2Regs *r, u32 tag)
+{
+	if (!gcap_fp || (gcap_cnt++ % gcap_every)) return;
+	fwrite(r, sizeof(*r), 1, gcap_fp);
+	fwrite(&tag, 4, 1, gcap_fp);
+	if (++gcap_n >= gcap_max) { fclose(gcap_fp); gcap_fp = NULL; fprintf(stderr, "gtecap: %lu records done\n", gcap_n); }
+}
+static void gcap_RTPS(psxCP2Regs *r, u32 code) { gcap(r, GTEOP_RTPS); gcap_rtps(r, code); }
+static void gcap_RTPT(psxCP2Regs *r, u32 code) { gcap(r, GTEOP_RTPT); gcap_rtpt(r, code); }
+static void gcap_close(void) { if (gcap_fp) { fclose(gcap_fp); gcap_fp = NULL; fprintf(stderr, "gtecap: %lu records (exit)\n", gcap_n); } }
+static void __attribute__((constructor)) gcap_init(void)
+{
+	const char *p = getenv("EROSQ_GTE_CAP");
+	if (!p) return;
+	if (getenv("EROSQ_GTE_CAP_N")) gcap_max = strtoul(getenv("EROSQ_GTE_CAP_N"), 0, 0);
+	if (getenv("EROSQ_GTE_CAP_EVERY")) gcap_every = strtoul(getenv("EROSQ_GTE_CAP_EVERY"), 0, 0);
+	if (!gte_h_RTPS) gte_h_RTPS = gteGetHandler(gte_code_RTPS);
+	if (!gte_h_RTPT) gte_h_RTPT = gteGetHandler(gte_code_RTPT);
+	gcap_rtps = gte_h_RTPS; gcap_rtpt = gte_h_RTPT;
+	gte_h_RTPS = gcap_RTPS; gte_h_RTPT = gcap_RTPT;
+	gcap_fp = fopen(p, "wb");
+	atexit(gcap_close);
+	fprintf(stderr, "gtecap: -> %s every %lu max %lu\n", p, gcap_every, gcap_max);
+}
+#endif
+
 GTE_SHIM1(OP,    GTEOP_OP)
 GTE_SHIM1(DPCS,  GTEOP_DPCS)
 GTE_SHIM1(INTPL, GTEOP_INTPL)
