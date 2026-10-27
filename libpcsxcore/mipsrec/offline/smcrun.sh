@@ -1,4 +1,5 @@
 #!/bin/bash
+EROSQ_ROOT=${EROSQ_ROOT:-$(cd "$(dirname "$0")/../../../.." && pwd)}
 # smcrun.sh N [FIRST_SEED] -- SMC stress (gen_smc.py + smcstress.c, ideas/jitsize-pageprot).
 # Per seed: the interpreter is the reference; mipsrec must match it (final
 # GPRs, code/data RAM hash, v1, end=done) in every config below, each with
@@ -9,11 +10,11 @@
 #   storm    EROSQ_PPSTORM=2            (storms + verify prologues)
 # Env: S scratch dir, W tree with built objects, NOBUILD=1, CONFIGS to override.
 set -u
-S=${S:-/tmp/jitsize/smc}
+S=${S:-${TMPDIR:-/tmp}/erosq-jitsize-smc}
 W=${W:-$(cd "$(dirname "$0")/../../.." && pwd)}
 OFF=$W/libpcsxcore/mipsrec/offline
-export PATH=buildroot-2026.08/output/host/bin:$PATH
-QEMU="qemu-mipsel-static -L buildroot-2026.08/output/host/mipsel-buildroot-linux-musl/sysroot"
+export PATH=$EROSQ_ROOT/buildroot-2026.08/output/host/bin:$PATH
+QEMU="qemu-mipsel-static -L $EROSQ_ROOT/buildroot-2026.08/output/host/mipsel-buildroot-linux-musl/sysroot"
 mkdir -p $S
 if [ -z "${NOBUILD:-}" ]; then
   ( cd $W

@@ -1,4 +1,5 @@
 #!/bin/bash
+EROSQ_ROOT=${EROSQ_ROOT:-$(cd "$(dirname "$0")/../../../.." && pwd)}
 # divtest.sh -- MDU const-operand differential test (divtest.c), 2026-10-20.
 # One generated guest program covers DIV/DIVU/MULT/MULTU over
 #   dividends {0,1,-1,7,-7,6,-6,INT_MIN,INT_MAX,0x12345678,-0x12345678} x
@@ -23,8 +24,8 @@ set -u
 S=${S:-/tmp/divtest}
 W=${W:-$(cd "$(dirname "$0")/../../.." && pwd)}
 OFF=$W/libpcsxcore/mipsrec/offline
-export PATH=buildroot-2026.08/output/host/bin:$PATH
-QEMU="qemu-mipsel-static -L buildroot-2026.08/output/host/mipsel-buildroot-linux-musl/sysroot"
+export PATH=$EROSQ_ROOT/buildroot-2026.08/output/host/bin:$PATH
+QEMU="qemu-mipsel-static -L $EROSQ_ROOT/buildroot-2026.08/output/host/mipsel-buildroot-linux-musl/sysroot"
 mkdir -p $S
 if [ -z "${NOBUILD:-}" ]; then
   ( cd $W

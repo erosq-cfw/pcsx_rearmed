@@ -1,4 +1,5 @@
 #!/bin/bash
+EROSQ_ROOT=${EROSQ_ROOT:-$(cd "$(dirname "$0")/../../../.." && pwd)}
 # hlink.sh N [FIRST_SEED]   random programs, per-class pass counts
 # hlink.sh ctl              exact-count controls per linked site kind (below)
 # hlink.sh reset N        code-cache-reset differential (16 KB cache, no SMC; HL_RESET_BOTH=1 = both sides)
@@ -15,11 +16,11 @@
 # Env: S (scratch dir), W (pcsx tree with built objects), NOBUILD=1, HL_A_MODE (side A link mode, 0),
 # HX_TIMEOUT (s per run, 120), MINIMISE=0 (skip minimising, for mutants).
 set -u
-S=${S:-/tmp/hl}
+S=${S:-${TMPDIR:-/tmp}/erosq-hl}
 W=${W:-$(cd "$(dirname "$0")/../../.." && pwd)}
 OFF=$W/libpcsxcore/mipsrec/offline
-export PATH=buildroot-2026.08/output/host/bin:$PATH
-QEMU="qemu-mipsel-static -L buildroot-2026.08/output/host/mipsel-buildroot-linux-musl/sysroot"
+export PATH=$EROSQ_ROOT/buildroot-2026.08/output/host/bin:$PATH
+QEMU="qemu-mipsel-static -L $EROSQ_ROOT/buildroot-2026.08/output/host/mipsel-buildroot-linux-musl/sysroot"
 mkdir -p $S
 # one hlink.sh per scratch dir: two runs sharing $S overwrite each other's
 # $S/t.bin between the A and B arms (2026-10-22: a rerun into a live bar's dir

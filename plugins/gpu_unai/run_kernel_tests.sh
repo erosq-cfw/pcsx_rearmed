@@ -1,4 +1,5 @@
 #!/bin/bash
+EROSQ_ROOT=${EROSQ_ROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}
 # run_kernel_tests.sh -- GPU/cspace kernel differential tests (offline bar for any
 # gpu_unai / cspace kernel or compiler change). Each test is built twice: host g++
 # and the MIPS ship toolchain + XBurst cc1 with the ship opt flags, run under qemu-user.
@@ -9,8 +10,8 @@
 W=$(cd "$(dirname "$0")/../.." && pwd)
 
 T=${T:-$(mktemp -d)}; mkdir -p "$T"   # default: private 0700 dir (a fixed /tmp path could be pre-planted)
-BR=${BR_HOST:-buildroot-2026.08/output-gcc15/host}
-XB=${XB:-gcc15-xburst-cc1}
+BR=${BR_HOST:-$EROSQ_ROOT/buildroot-2026.08/output-gcc15/host}
+XB=${XB:-$EROSQ_ROOT/gcc15-xburst-cc1}
 OPT="-Ofast -B$XB/ -mtune=24kc --param max-unroll-times=2"
 cd $W
 pass=0; fail=0

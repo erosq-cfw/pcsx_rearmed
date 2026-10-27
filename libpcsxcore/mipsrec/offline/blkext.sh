@@ -1,4 +1,5 @@
 #!/bin/bash
+EROSQ_ROOT=${EROSQ_ROOT:-$(cd "$(dirname "$0")/../../../.." && pwd)}
 # blkext.sh -- DMA-overwrites-an-earlier-starting-block fixture (blkext/dmamid.S).
 # A psxCpu->Clear of blockB+4 (as a DMA into RAM does) must invalidate blockB,
 # which starts one word earlier: the final v0 must be 0x222 (new code), with
@@ -11,7 +12,7 @@ set -u
 S=${S:?S=scratch dir}
 W=${W:-$(cd "$(dirname "$0")/../../.." && pwd)}
 OFF=$W/libpcsxcore/mipsrec/offline
-BR=${BR_HOST:-buildroot-2026.08/output/host}
+BR=${BR_HOST:-$EROSQ_ROOT/buildroot-2026.08/output/host}
 export PATH=$BR/bin:$PATH
 QEMU="qemu-mipsel-static -L $BR/mipsel-buildroot-linux-musl/sysroot"
 mkdir -p $S

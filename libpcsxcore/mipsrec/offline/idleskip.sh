@@ -1,4 +1,5 @@
 #!/bin/bash
+EROSQ_ROOT=${EROSQ_ROOT:-$(cd "$(dirname "$0")/../../../.." && pwd)}
 # idleskip.sh -- EROSQ_IDLESKIP differential cases on the hlink harness (qemu-user).
 # Each case is a guest program holding one idle shape (V / I / A, jitsched.cpp);
 # it runs with EROSQ_IDLESKIP=0 and =1 (x JITSCHED 0/1 x BLOCKLINK 0/3) and the
@@ -24,8 +25,8 @@ set -u
 S=${S:-/tmp/idleskip.$$}
 W=${W:-$(cd "$(dirname "$0")/../../.." && pwd)}
 OFF=$W/libpcsxcore/mipsrec/offline
-export PATH=buildroot-2026.08/output/host/bin:$PATH
-QEMU="qemu-mipsel-static -L buildroot-2026.08/output/host/mipsel-buildroot-linux-musl/sysroot"
+export PATH=$EROSQ_ROOT/buildroot-2026.08/output/host/bin:$PATH
+QEMU="qemu-mipsel-static -L $EROSQ_ROOT/buildroot-2026.08/output/host/mipsel-buildroot-linux-musl/sysroot"
 mkdir -p $S
 [ -n "${NOBUILD:-}" ] || S=$S NOBUILD= bash $OFF/hlink.sh 0 > $S/build.log 2>&1   # builds $S/hlink (0 seeds)
 [ -x $S/hlink ] || { echo "no hlink binary"; cat $S/build.log; exit 1; }

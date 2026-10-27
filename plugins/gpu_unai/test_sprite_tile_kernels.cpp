@@ -5,7 +5,7 @@
  * under __mips__; GPU_MXU_HOST_TEST swaps the MXU ops for C models, so no MXU
  * hardware/emulation is needed; -fpermissive: the harness casts to const
  * le16_t* fields that are non-const):
- *   B=buildroot-2026.08/output/host
+ *   B=$EROSQ_ROOT/buildroot-2026.08/output/host
  *   $B/bin/mipsel-buildroot-linux-musl-g++ -O2 -fpermissive -Iinclude -o /tmp/test_sprite_tile_kernels \
  *     plugins/gpu_unai/test_sprite_tile_kernels.cpp && qemu-mipsel-static -L $B/mipsel-buildroot-linux-musl/sysroot /tmp/test_sprite_tile_kernels
  *

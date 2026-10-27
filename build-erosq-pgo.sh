@@ -1,4 +1,5 @@
 #!/bin/sh
+EROSQ_ROOT=${EROSQ_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}
 # PGO build of the EROSQ pcsx frontend. Applies the checked-in profile in
 # pgo-profile/ (see pgo-profile/README.md for how it was collected). Measured
 # +3.6% on the Crash slot-0 scene, ~+1% on other heavy games, no regressions,
@@ -9,10 +10,10 @@
 # partial-training keeps the unprofiled dynarec TUs from being pessimized.
 # NOTE (2026-10-16): the shipped binary is built with build-erosq-pgo-xb.sh
 # (same profile + the X1000-latency gcc scheduler patch in erosq-gcc/, cc1 at
-# gcc-xburst-cc1). Building ship binaries with THIS script
+# $EROSQ_ROOT/gcc-xburst-cc1). Building ship binaries with THIS script
 # silently drops that scheduler (measured ~3-4%) -- same trap as the PGO one.
 set -e
-export PATH=buildroot-2026.08/output/host/bin:$PATH
+export PATH=$EROSQ_ROOT/buildroot-2026.08/output/host/bin:$PATH
 cd "$(dirname "$0")"
 
 PROF="$(pwd)/pgo-profile"

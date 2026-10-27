@@ -1,9 +1,10 @@
 #!/bin/sh
+EROSQ_ROOT=${EROSQ_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}
 # Milestone-1 proving build: pcsx_rearmed libretro core for EROSQ (X1000 mipsel musl).
 # Real core + Lightrec + gpu_unai, no SDL/plat. Headless loader drives it on-device.
 set -e
-export PATH=buildroot-2026.08/output/host/bin:$PATH
-cd pcsx_rearmed
+export PATH=$EROSQ_ROOT/buildroot-2026.08/output/host/bin:$PATH
+cd "$(dirname "$0")"
 
 TC=mipsel-buildroot-linux-musl
 export CC=${TC}-gcc

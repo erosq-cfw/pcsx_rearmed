@@ -1,4 +1,5 @@
 #!/bin/sh
+EROSQ_ROOT=${EROSQ_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}
 # PGO build of the EROSQ pcsx frontend. Applies the checked-in profile in
 # pgo-profile/ (see pgo-profile/README.md for how it was collected). Measured
 # +3.6% on the Crash slot-0 scene, ~+1% on other heavy games, no regressions,
@@ -8,7 +9,7 @@
 # under gcov instrumentation), then applied to the dynarec build. -fprofile-
 # partial-training keeps the unprofiled dynarec TUs from being pessimized.
 set -e
-export PATH=buildroot-2026.08/output/host/bin:$PATH
+export PATH=$EROSQ_ROOT/buildroot-2026.08/output/host/bin:$PATH
 cd "$(dirname "$0")"
 
 # PROF_DIR=<dir> uses (or, with PGO_GEN=1, records into) another profile dir,

@@ -2,7 +2,9 @@
 # JITSCHED bar: vs the shipped binary, every pre-existing symbol must show delta 0 and
 # "size changed: []" (re-derive JITSCHED_RECOMPILE_PAD in recompiler.cpp if not).
 import subprocess, collections, sys
-NM='buildroot-2026.08/output/host/bin/mipsel-buildroot-linux-musl-nm'
+import os
+EROSQ_ROOT=os.environ.get('EROSQ_ROOT') or os.path.abspath(os.path.join(os.path.dirname(__file__),'../../../..'))
+NM=os.environ.get('NM') or os.path.join(EROSQ_ROOT,'buildroot-2026.08/output/host/bin/mipsel-buildroot-linux-musl-nm')
 def syms(f):
     d={}
     for l in subprocess.run([NM,'-S','-n',f],capture_output=True,text=True).stdout.split('\n'):

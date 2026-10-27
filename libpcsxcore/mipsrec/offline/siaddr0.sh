@@ -1,4 +1,5 @@
 #!/bin/bash
+EROSQ_ROOT=${EROSQ_ROOT:-$(cd "$(dirname "$0")/../../../.." && pwd)}
 # siaddr0.sh BIN EXE : the device kernel's address-error SIGBUS has si_addr = 0,
 # qemu-user fills it in. Run EXE (an exception-heavy test such as Amidog
 # psxtest_cpu) headless twice, once with EROSQ_TEST_SIADDR0=1 (ua_sigbus zeroes
@@ -8,9 +9,9 @@
 # .pcsx/bios/scph1001.bin. Mutant: build jitsched with -DSIADDR_MUTANT (the
 # pre-ff97856 si_addr test): must FAIL.
 BIN=${1:?BIN}; EXE=${2:?EXE}
-HOMET=${HOMET:-/tmp/idlesize/home-gt2}
-Q=${Q:-/tmp/qemu/qemu-10.2.0/build/qemu-mipsel}
-SYSROOT=buildroot-2026.08/output/host/mipsel-buildroot-linux-musl/sysroot
+HOMET=${HOMET:-${TMPDIR:-/tmp}/erosq-idlesize-home-gt2}
+Q=${Q:-qemu-mipsel}
+SYSROOT=$EROSQ_ROOT/buildroot-2026.08/output/host/mipsel-buildroot-linux-musl/sysroot
 T=$(mktemp -d); trap 'rm -rf $T' EXIT
 run() {  # tag env...
 	local t=$1; shift; cp -a $HOMET $T/h-$t

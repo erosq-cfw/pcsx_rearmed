@@ -26,7 +26,7 @@
  * header. Instead this test is built for an actual 32-bit little-endian
  * MIPS target, which satisfies the guard for real:
  *
- *   export PATH=buildroot-2026.05/output/host/bin:$PATH
+ *   export PATH=$EROSQ_ROOT/buildroot-2026.05/output/host/bin:$PATH
  *   mipsel-buildroot-linux-musl-gcc -static -I .. \
  *       -o test_encoders tests/test_encoders.c
  *   qemu-mipsel ./test_encoders
