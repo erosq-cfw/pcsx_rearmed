@@ -19,6 +19,8 @@
  *   HX_STOP_CYCLE=N stop at the first horizon with cycle >= N (spin programs:
  *                   the fresh run stops where the inline run stopped).
  *   HX_INT=1        interpreter reference (HX_INT_CYCLES=N for spin programs).
+ *   HX_EXACT=1      with HX_INT: install the interpreter's exact AdEL/AdES
+ *                   load/store variants (intEnsureExactAccess).
  *
  * Output: "STATE gpr=<hash> ram=<hash> cycle=<u32> pc=<u32> horizons=<n>
  *          link_taken=<n|na> end=<done|stopped|cap>"
@@ -146,6 +148,10 @@ int main(int argc, char **argv)
 		 * programs) stops at the first block boundary with cycle >= N. */
 		psxCpu = &psxInt;
 		psxInt.Init(); psxInt.Reset();
+		if (getenv("HX_EXACT")) {   /* jrld.sh: exact AdEL/AdES, as mipsrec raises them */
+			extern void intEnsureExactAccess(void);
+			intEnsureExactAccess();
+		}
 		const u32 stopc = getenv("HX_INT_CYCLES") ? strtoul(getenv("HX_INT_CYCLES"), 0, 0) : 0;
 		end_reason = 3;
 		for (unsigned long n = 0; n < 20000000ul; n++) {
@@ -153,8 +159,13 @@ int main(int argc, char **argv)
 			if (*(u32 *)(ram + (DONE & 0x1fffff)) == DONE_MAGIC) { end_reason = 1; break; }
 			if (stopc && (s32)(psxRegs.cycle - stopc) >= 0) { end_reason = 2; break; }
 		}
-	} else
+	} else {
+		/* HX_APPLYCFG=1 (jrld.sh): as the frontend, psxRec.ApplyConfig() ->
+		 * intApplyConfig(), which sets the interpreter fetch pointer the
+		 * code-outside-RAM fallback (mipsrec_cio_run) needs */
+		if (getenv("HX_APPLYCFG")) psxRec.ApplyConfig();
 		mipsrec_rec_execute();
+	}
 
 	u32 g = fnv(psxRegs.GPR.r, 26 * 4, 2166136261u);            /* r0..r25 */
 	g = fnv(&psxRegs.GPR.r[28], 4 * 4, g);                       /* gp sp fp ra */
