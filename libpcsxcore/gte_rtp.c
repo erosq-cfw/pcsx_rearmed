@@ -299,6 +299,8 @@ static void __attribute__((constructor, section(".text.gtertp_sel"))) gtertp_sel
 	if (m != 1 && m != 2) {
 		if (m)
 			fprintf(stderr, "gtertp: EROSQ_GTERTP=%s unknown (0 off, 1 unrolled, 2 rolled): off\n", e);
+		else
+			fprintf(stderr, "gtertp: EROSQ_GTERTP=0 (off)\n");
 		return;
 	}
 	if (gte_h_RTPS != gteRTPS_sf1lm0 || gte_h_RTPT != gteRTPT_sf1lm0) {
