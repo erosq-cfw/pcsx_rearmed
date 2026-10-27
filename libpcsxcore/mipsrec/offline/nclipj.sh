@@ -4,8 +4,7 @@
 # (gte_h_NCLIP = gte.c gteNCLIP_) on the same SXY FIFO, for:
 #   jit1 / jit1fm   EROSQ_NCLIPJ=1 (inline NCLIP), faultmem off / on
 #   jit0            EROSQ_NCLIPJ=0 (JAL to the C handler: harness control)
-#   interp          interpreter (harness control; HX_NRAND_INT random vectors, default
-#                   20000: the interpreter needs ~30 min for the full set under qemu)
+#   interp          interpreter (harness control)
 # Also counts boundary hits (the vector set has to set FLAG in some cases).
 # Env: S scratch dir, W tree with built objects (build-erosq-pgo-xb.sh), NOBUILD=1, HX_NRAND.
 # Mutant check (recipe): flip the bit-15/16 choice in opcodes.h recNCLIP_inl
@@ -31,7 +30,7 @@ if [ -z "${NOBUILD:-}" ]; then
     { echo "build failed"; grep -v abicalls $S/link.err | head; exit 1; }
 fi
 fail=0
-for arm in "jit1:EROSQ_NCLIPJ=1" "jit1fm:EROSQ_NCLIPJ=1 HX_FM=1" "jit0:EROSQ_NCLIPJ=0" "interp:HX_INT=1 HX_NRAND=${HX_NRAND_INT:-20000}"; do
+for arm in "jit1:EROSQ_NCLIPJ=1" "jit1fm:EROSQ_NCLIPJ=1 HX_FM=1" "jit0:EROSQ_NCLIPJ=0" "interp:HX_INT=1"; do
   IFS=: read name env <<< "$arm"
   out=$(env $env timeout ${HX_TIMEOUT:-1800} $QEMU $S/nclipj $S/nclipj.bin 2>&1)
   rc=$?

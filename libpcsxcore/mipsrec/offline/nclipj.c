@@ -165,6 +165,8 @@ int main(int argc, char **argv)
 		psxRegs.CP0.n.SR = 0x50000000;   /* CU2 | CU0 */
 		psxRegs.CP2C.r[31] = 0x5a5a5a5a;  /* NCLIP must overwrite FLAG */
 		end_reason = 0;
+		if (interp)   /* the interpreter picks its COP2 handler from SR only on notify/config */
+			psxInt.Notify(R3000ACPU_NOTIFY_AFTER_LOAD, NULL);
 		if (interp) {
 			for (unsigned long k = 0; k < 400000000ul && !end_reason; k++) {
 				psxInt.ExecuteBlock(&psxRegs, 0);
