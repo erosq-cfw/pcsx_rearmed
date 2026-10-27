@@ -1,6 +1,12 @@
 /*
- * erosq PROTOTYPE (perf/gte-rtp, design phase -- not wired into any build):
- * bit-exact fast RTPS/RTPT (sf=1, lm=0) for the X1000.
+ * erosq perf/gte-rtp: bit-exact fast RTPS/RTPT (sf=1, lm=0) for the X1000,
+ * selected at startup by EROSQ_GTERTP (see gtertp_select() at the end):
+ *   0 / unset  off: mipsrec keeps gte.c's handlers (dispatch as before)
+ *   1          fast RTPS + fast RTPT, vertex loop unrolled
+ *   2          fast RTPS + fast RTPT, vertex loop rolled (smaller, I-cache)
+ * Built only into mipsrec builds, as the LAST object (Makefile), so all of its
+ * code lands after every pre-existing .text symbol: the PGO layout of the
+ * shipped binary does not move.
  *
  * Same results as gte.c gteRTPS_sf1lm0/gteRTPT_sf1lm0 for ALL written GTE
  * state (FLAG, MAC0-3, IR0-3, SXY/SZ FIFOs; untouched halves stay untouched).
@@ -24,13 +30,12 @@
  * 5. Saturations stay exact: each clamp is a compare + rare branch that ORs
  *    the same FLAG bit gte.c sets.
  */
+#include <stdio.h>
+#include <stdlib.h>
 #include "gte.h"
 #include "gte_divider.h"
 #include "../include/compiler_features.h"
 
-#ifndef RTP_UNROLL   /* RTPT vertex loop: 3 = fully unrolled, 1 = rolled (I-cache) */
-#define RTP_UNROLL 3
-#endif
 #define RTP_PRAGMA_(x) _Pragma(#x)
 #define RTP_PRAGMA(x) RTP_PRAGMA_(x)
 
@@ -189,27 +194,129 @@ void no_stackprotector gteRTPS_sf1lm0_x(psxCP2Regs *regs, u32 code)
 	rtp_tail(regs, flags, q, mac1, mac2, mac3, ir1, ir2);
 }
 
-void no_stackprotector gteRTPT_sf1lm0_x(psxCP2Regs *regs, u32 code)
+/* RTPT, vertex loop unrolled UNROLL times (3 = fully, 1 = rolled) */
+#define RTP_DEF_RTPT(NAME, UNROLL) \
+void no_stackprotector NAME(psxCP2Regs *regs, u32 code) \
+{ \
+	struct rtp_m m; \
+	s32 mac1, mac2, mac3, ir1, ir2, q, ofx, ofy; \
+	u32 sz3, sxy, h, flags = 0; \
+	int v; \
+ \
+	RTP_LOAD_M(m); \
+	if (unlikely(!RTP_GUARD_OK(m))) { \
+		gteRTPT_sf1lm0(regs, code); \
+		return; \
+	} \
+	h = CP(26).w.l; ofx = CRS(24); ofy = CRS(25); \
+	DP(16).w.l = DP(19).w.l;    /* SZ0 = SZ3 */ \
+	RTP_PRAGMA(GCC unroll UNROLL) \
+	for (v = 0; v < 3; v++) { \
+		q = rtp_vertex(&m, &flags, h, ofx, ofy, \
+			DP(v * 2).sw.l, DP(v * 2).sw.h, DP(v * 2 + 1).sw.l, \
+			&mac1, &mac2, &mac3, &ir1, &ir2, &sz3, &sxy); \
+		DP(17 + v).w.l = sz3; \
+		DR(12 + v) = sxy; \
+	} \
+	rtp_tail(regs, flags, q, mac1, mac2, mac3, ir1, ir2); \
+}
+
+void gteRTPT_sf1lm0_x(psxCP2Regs *regs, u32 code);
+void gteRTPT_sf1lm0_xr(psxCP2Regs *regs, u32 code);
+RTP_DEF_RTPT(gteRTPT_sf1lm0_x, 3)    /* EROSQ_GTERTP=1 */
+RTP_DEF_RTPT(gteRTPT_sf1lm0_xr, 1)   /* EROSQ_GTERTP=2 */
+
+/* ---- selector ------------------------------------------------------------
+ * mipsrec/plugin.c resolves gte_h_RTPS / gte_h_RTPT (the handlers the JIT
+ * bakes a direct JAL to, and its shims call) in constructors; this object is
+ * linked after plugin.o, so its constructor runs after those (.init_array is
+ * in link order) and swaps in the fast handlers. If they are not the expected
+ * gte.c handlers yet it says so and stays off rather than being silently
+ * overwritten. Own section: a plain constructor goes to .text.startup, which
+ * precedes .text.hot and would shift every hot symbol of the PGO layout.
+ * gtertp_mode is read by jitsched.cpp: with EROSQ_GTENF on, the selected fast
+ * RTPS/RTPT is kept instead of being swapped for the flagless _nf handler. */
+extern gte_handler *gte_h_RTPS, *gte_h_RTPT;
+int gtertp_mode;
+
+#ifdef GTERTP_SHADOW
+/* HOST/HEADLESS ONLY (-DGTERTP_SHADOW; never in the device build): every
+ * RTPS/RTPT runs both the fast path and the original gte.c handler on copies
+ * of the full CP2 state, compares all 64 words, aborts on the first mismatch,
+ * and hands the ORIGINAL handler's state back, so emulation is unchanged. */
+#include <string.h>
+static gte_handler *sv_fast[2], *sv_ref[2];
+static unsigned long sv_n[2], sv_pass[2], sv_bad[2];
+static const char *const sv_name[2] = { "RTPS", "RTPT" };
+/* 1 = this CP2 state takes the fast path (else the call falls back to gte.c) */
+static int sv_guard_ok(const psxCP2Regs *regs)
 {
 	struct rtp_m m;
-	s32 mac1, mac2, mac3, ir1, ir2, q, ofx, ofy;
-	u32 sz3, sxy, h, flags = 0;
-	int v;
-
 	RTP_LOAD_M(m);
-	if (unlikely(!RTP_GUARD_OK(m))) {
-		gteRTPT_sf1lm0(regs, code);
+	return RTP_GUARD_OK(m);
+}
+void gtertp_sv_report(void)
+{
+	int k;
+	for (k = 0; k < 2; k++)
+		fprintf(stderr, "gtertp-sv: %s verified %lu guard-pass %lu fallback %lu mismatches %lu\n",
+			sv_name[k], sv_n[k], sv_pass[k], sv_n[k] - sv_pass[k], sv_bad[k]);
+	fflush(stderr);
+}
+static void sv_run(int k, psxCP2Regs *regs, u32 code)
+{
+	psxCP2Regs in = *regs, a = *regs, b = *regs;
+	const int pass = sv_guard_ok(regs);
+	int i;
+	sv_fast[k](&a, code);
+	sv_ref[k](&b, code);
+	if (memcmp(&a, &b, sizeof(a))) {
+		fprintf(stderr, "gtertp-sv: MISMATCH %s call #%lu code=%08x guard=%s mode=%d\n",
+			sv_name[k], sv_n[k] + 1, code, pass ? "pass" : "fallback", gtertp_mode);
+		for (i = 0; i < 64; i++) {
+			const u32 x = ((u32 *)&in)[i], f = ((u32 *)&a)[i], r = ((u32 *)&b)[i];
+			fprintf(stderr, "  %s%-2d in=%08x fast=%08x ref=%08x%s\n", i < 32 ? "D" : "C", i & 31,
+				x, f, r, f != r ? "  <<<" : "");
+		}
+		sv_bad[k]++;
+		gtertp_sv_report();
+		abort();
+	}
+	*regs = b;
+	sv_n[k]++;
+	sv_pass[k] += pass;
+}
+static void sv_RTPS(psxCP2Regs *regs, u32 code) { sv_run(0, regs, code); }
+static void sv_RTPT(psxCP2Regs *regs, u32 code) { sv_run(1, regs, code); }
+#endif
+
+static void __attribute__((constructor, section(".text.gtertp_sel"))) gtertp_select(void)
+{
+	const char *e = getenv("EROSQ_GTERTP");
+	gte_handler *rtpt;
+	int m = e ? atoi(e) : 0;
+
+	if (m != 1 && m != 2) {
+		if (m)
+			fprintf(stderr, "gtertp: EROSQ_GTERTP=%s unknown (0 off, 1 unrolled, 2 rolled): off\n", e);
 		return;
 	}
-	h = CP(26).w.l; ofx = CRS(24); ofy = CRS(25);
-	DP(16).w.l = DP(19).w.l;    /* SZ0 = SZ3 */
-RTP_PRAGMA(GCC unroll RTP_UNROLL)
-	for (v = 0; v < 3; v++) {
-		q = rtp_vertex(&m, &flags, h, ofx, ofy,
-			DP(v * 2).sw.l, DP(v * 2).sw.h, DP(v * 2 + 1).sw.l,
-			&mac1, &mac2, &mac3, &ir1, &ir2, &sz3, &sxy);
-		DP(17 + v).w.l = sz3;
-		DR(12 + v) = sxy;
+	if (gte_h_RTPS != gteRTPS_sf1lm0 || gte_h_RTPT != gteRTPT_sf1lm0) {
+		fprintf(stderr, "gtertp: RTPS/RTPT handlers not resolved yet (%p %p): off\n",
+			(void *)gte_h_RTPS, (void *)gte_h_RTPT);
+		return;
 	}
-	rtp_tail(regs, flags, q, mac1, mac2, mac3, ir1, ir2);
+	rtpt = m == 1 ? gteRTPT_sf1lm0_x : gteRTPT_sf1lm0_xr;
+	gtertp_mode = m;
+#ifdef GTERTP_SHADOW
+	sv_fast[0] = gteRTPS_sf1lm0_x; sv_ref[0] = gte_h_RTPS;
+	sv_fast[1] = rtpt;             sv_ref[1] = gte_h_RTPT;
+	gte_h_RTPS = sv_RTPS;
+	gte_h_RTPT = sv_RTPT;
+	fprintf(stderr, "gtertp: EROSQ_GTERTP=%d (RTPS fast, RTPT %s) SHADOW-VERIFY\n", m, m == 1 ? "unrolled" : "rolled");
+#else
+	gte_h_RTPS = gteRTPS_sf1lm0_x;
+	gte_h_RTPT = rtpt;
+	fprintf(stderr, "gtertp: EROSQ_GTERTP=%d (RTPS fast, RTPT %s)\n", m, m == 1 ? "unrolled" : "rolled");
+#endif
 }

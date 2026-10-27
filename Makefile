@@ -584,6 +584,10 @@ ifeq "$(DYNAREC)" "mipsrec"
 # grow .eh_frame, which precedes .plt).
 OBJS += libpcsxcore/mipsrec/jitsched.o
 LDFLAGS += -Wl,-T,libpcsxcore/mipsrec/jitsched.ld
+# EROSQ_GTERTP fast RTPS/RTPT (default off). LAST object: its code follows every
+# pre-existing .text symbol and its .bss comes last, so the PGO layout of the
+# hot code does not move; its selector constructor runs after plugin.o's.
+OBJS += libpcsxcore/gte_rtp.o
 # A/B pixel gates (EROSQ_FHASH / EROSQ_SHOT_FLIP) hook the present, see jitsched.cpp
 LDFLAGS += -Wl,--wrap=drm_present
 libpcsxcore/mipsrec/jitsched.o: libpcsxcore/mipsrec/jitsched.cpp libpcsxcore/mipsrec/jitsched.h

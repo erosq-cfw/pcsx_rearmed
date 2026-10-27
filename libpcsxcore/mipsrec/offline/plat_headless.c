@@ -43,6 +43,7 @@ void mipsrec_rec_reset(void) __attribute__((weak));
 void mipsrec_debug_regions(uintptr_t *v) __attribute__((weak));
 void mipsrec_idleskip_report(void) __attribute__((weak));
 void mipsrec_ua_report(void) __attribute__((weak));
+void gtertp_sv_report(void) __attribute__((weak));   /* gte_rtp.c, -DGTERTP_SHADOW builds only */
 
 int g_prof_on, g_prof_print;   /* plat_erosq.c twins (EROSQ_PROF; PROF-light 2056a2b) */
 unsigned long long g_prof_gpu_ns, g_prof_present_ns, g_prof_spu_ns;
@@ -417,6 +418,7 @@ static void cyc_hook(psxCP0Regs *cp0)
 	}
 	if (mipsrec_idleskip_report) mipsrec_idleskip_report();
 	if (mipsrec_ua_report) mipsrec_ua_report();
+	if (gtertp_sv_report) gtertp_sv_report();
 	fprintf(stderr, "[hx] done after %llu cycles (%lu frames)\n", cyc_used, frames);
 	fflush(NULL);
 	_exit(0);
@@ -511,6 +513,7 @@ void *plat_gvideo_flip(void)
 			}
 			if (mipsrec_idleskip_report) mipsrec_idleskip_report();
 			if (mipsrec_ua_report) mipsrec_ua_report();
+			if (gtertp_sv_report) gtertp_sv_report();
 		}
 		fprintf(stderr, "[hx] done after %lu frames\n", frames);
 		fflush(NULL);

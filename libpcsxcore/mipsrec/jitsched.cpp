@@ -509,6 +509,7 @@ static int gtenf_dead(uint32_t pc, int *budget, int depth)
 		pc += 4;
 	}
 }
+extern "C" int gtertp_mode;   /* gte_rtp.c: EROSQ_GTERTP, nonzero once the fast RTPS/RTPT are installed */
 extern "C" int mipsrec_gte_flag_dead(uint32_t next_pc, int in_delay_slot)
 {
 	if (gtenf_on < 0) {
@@ -517,6 +518,10 @@ extern "C" int mipsrec_gte_flag_dead(uint32_t next_pc, int in_delay_slot)
 	}
 	int budget = 400;
 	if (gtenf_on <= 0 || in_delay_slot)
+		return 0;
+	/* EROSQ_GTERTP: keep the selected fast RTPS/RTPT (psxRegs.code = the GTE
+	 * command being compiled) -- the _nf swap would silently undo it */
+	if (gtertp_mode && ((psxRegs.code & 0x3f) == 0x01 || (psxRegs.code & 0x3f) == 0x30))
 		return 0;
 	const int d = gtenf_dead(next_pc, &budget, 0);
 	if (gtenf_on > 1 && (++gtenf_n, gtenf_nf += d, (gtenf_n & 0x7f) == 0))   /* EROSQ_GTENF=2: compile-time stat */

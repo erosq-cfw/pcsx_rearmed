@@ -1,5 +1,5 @@
-/* test_gte_rtp (erosq perf/gte-rtp): build: scratchpad gte/build.sh recipe -- ship flags (-Ofast -B gcc-xburst-cc1 -mtune=24kc -fno-pic -mno-abicalls -G0), link gte.o gte_divider.o gte_rtp.o + stubs (psxRegs), run under qemu-mipsel.
- * difftest: gte.c gteRTPS/RTPT_sf1lm0 (reference) vs gte_rtp.c *_x (prototype).
+/* test_gte_rtp (erosq perf/gte-rtp): build: scratchpad gte/build.sh recipe -- ship flags (-Ofast -B gcc-xburst-cc1 -mtune=24kc -fno-pic -mno-abicalls -G0), link gte.o gte_divider.o gte_rtp.o + stubs (psxRegs, gte_h_RTPS/gte_h_RTPT), run under qemu-mipsel.
+ * difftest: gte.c gteRTPS/RTPT_sf1lm0 (reference) vs gte_rtp.c *_x (EROSQ_GTERTP=1) and RTPT *_xr (rolled, EROSQ_GTERTP=2).
  * Compares ALL 64 CP2 words (+ the untouched-half semantics) after each call.
  *   difftest rand N SEED        random + edge-biased states
  *   difftest cap FILE...        captured states (256 B CP2 + 4 B tag each)
@@ -18,6 +18,7 @@ void gteRTPS_sf1lm0(psxCP2Regs *regs, u32 code);
 void gteRTPT_sf1lm0(psxCP2Regs *regs, u32 code);
 void gteRTPS_sf1lm0_x(psxCP2Regs *regs, u32 code);
 void gteRTPT_sf1lm0_x(psxCP2Regs *regs, u32 code);
+void gteRTPT_sf1lm0_xr(psxCP2Regs *regs, u32 code);
 
 #define CODE_RTPS (0x01u | (1u << 19))
 #define CODE_RTPT (0x30u | (1u << 19))
@@ -155,6 +156,12 @@ static void check(const psxCP2Regs *in, int which)
 		nvec++;
 		if (memcmp(&a, &b, sizeof(a))) { nbad++; show("RTPT", in, &a, &b); }
 	}
+	if (which & 4) {
+		a = *in; b = *in;
+		gteRTPT_sf1lm0(&a, CODE_RTPT); gteRTPT_sf1lm0_xr(&b, CODE_RTPT);
+		nvec++;
+		if (memcmp(&a, &b, sizeof(a))) { nbad++; show("RTPT rolled", in, &a, &b); }
+	}
 }
 
 struct cap { psxCP2Regs r; uint32_t tag; }; /* tag: GTE op (0x01 RTPS / 0x30 RTPT) */
@@ -164,7 +171,7 @@ int main(int argc, char **argv)
 	long i, n;
 	if (argc >= 4 && !strcmp(argv[1], "rand")) {
 		n = atol(argv[2]); s = strtoull(argv[3], 0, 0) | 1;
-		for (i = 0; i < n; i++) { psxCP2Regs r; gen(&r); check(&r, 3); }
+		for (i = 0; i < n; i++) { psxCP2Regs r; gen(&r); check(&r, 7); }
 	} else if (argc >= 3 && !strcmp(argv[1], "cap")) {
 		int f;
 		for (f = 2; f < argc; f++) {
@@ -172,7 +179,7 @@ int main(int argc, char **argv)
 			if (!fp) { perror(argv[f]); return 2; }
 			while (fread(&c, sizeof(c), 1, fp) == 1) {
 				/* run each capture through BOTH ops: same real state, double coverage */
-				check(&c.r, 3); k++;
+				check(&c.r, 7); k++;
 			}
 			fclose(fp);
 			printf("%s: %ld states, %ld mismatches\n", argv[f], k, nbad - nb0);
